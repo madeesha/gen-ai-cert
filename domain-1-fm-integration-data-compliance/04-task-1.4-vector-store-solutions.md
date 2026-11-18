@@ -13,18 +13,16 @@
 > Chunking, embedding model choice, k-NN/ANN query configuration, hybrid search, reranking and query handling are covered in [Task 1.5](05-task-1.5-retrieval-mechanisms.md). This file is about the **store**: its architecture, metadata, scale, connectors and data freshness.
 
 ## Key points
-- **Default managed answer = Bedrock Knowledge Bases.** It covers ingestion, chunking, embedding, storage, retrieval and citations. The vector store underneath is your architecture choice: **OpenSearch Serverless** (hybrid search, ms latency, high QPS) · **S3 Vectors** (cheapest, subsecond, semantic-only) · **Aurora PostgreSQL pgvector** (you already run Postgres, want SQL joins) · **Neptune Analytics** (GraphRAG) · OpenSearch managed clusters · MongoDB Atlas · Pinecone · Redis Enterprise Cloud.
-- ⚠️ The **vector store, embedding model, chunking strategy and parser are fixed when a KB is created**. To change any of them, create a new KB or data source and re-ingest. Index dimension must equal embedding dimension, otherwise **ingestion fails**.
-- **Separate the concerns.** Use **S3** as the system of record for raw documents. Use **RDS/Aurora or DynamoDB** for the document catalog, metadata, ACLs and ingestion state. Use a **vector store** for embeddings plus chunk text. Link them with a shared **document ID**.
-- **DynamoDB has no native vector search.** Pair it with a vector store, or use the **DynamoDB zero-ETL integration with OpenSearch Service** so DynamoDB data becomes vector-searchable.
-- **Metadata makes retrieval precise.** In KBs, add a `<file>.metadata.json` sidecar next to each S3 object (`metadataAttributes`) and **re-sync** after adding or changing it. Filter at query time with `equals`, `in`, `greaterThan`, `andAll`/`orAll` and similar operators. Use metadata for **time** (recency), **authorship**, **domain/topic**, **tenant** and **ACL**.
-- KBs read the **sidecar `.metadata.json`**, not S3 user-defined metadata or object tags. Use S3 object metadata and tags for lifecycle, governance and catalog jobs, then project them into the sidecar if retrieval needs them.
-- **Topic-based segmentation:** use OpenSearch with the **Neural plugin** (ML Commons connector to Bedrock, plus an ingest pipeline with a `text_embedding` processor). OpenSearch embeds documents at ingest and queries at search time. Run **one index per domain** or a **topic field plus filter**.
-- **Scale on OpenSearch managed clusters:** primary shard count is **fixed at index creation**; replicas can change later. Target roughly **10–50 GiB per shard**. HNSW graphs live in **off-heap native memory**, so size the cluster for vector RAM or use **quantization / disk-based mode**. OpenSearch **Serverless** scales automatically in **OCUs**, and you don't manage shards.
-- **Multi-index / hierarchical indexing:** keep separate indexes or KBs per domain, tenant or language. Use **routing** (agent, classifier or metadata) to choose the right index. Use a coarse summary index first, then a fine chunk index (two-stage retrieval).
-- **Connectors:** KB has native connectors for **S3, Web Crawler, Confluence, SharePoint, Salesforce**, plus **custom data source** (direct ingestion API). Credentials go in **Secrets Manager**. Other sources: **Amazon Q Business / Kendra connectors**, **AppFlow** (SaaS → S3), **DataSync/Transfer Family** (file shares → S3), **Lambda** (APIs/wikis → S3), **OpenSearch Ingestion** (S3/DynamoDB/Kafka → OpenSearch).
-- **Freshness:** an **ingestion job (StartIngestionJob)** is an **incremental** sync of adds, changes and deletes. Event-driven pattern: S3 event → **EventBridge → SQS (buffer/debounce) → Lambda → StartIngestionJob**. Scheduled pattern: **EventBridge Scheduler**. Near-real-time pattern: **IngestKnowledgeBaseDocuments / DeleteKnowledgeBaseDocuments** (direct ingestion, no full sync).
-- **Zero-downtime full rebuild:** build a new index (blue/green), then **swap an OpenSearch alias** or point the app at the new KB ID. Use deterministic chunk IDs for idempotent **upserts**, and delete stale chunks when a document changes or is removed.
+- **Mental model:** the **store** (this task) holds embeddings + chunk text + metadata; S3 is the system of record and a catalog (RDS/Aurora or DynamoDB) tracks documents, ACLs and ingestion state, all linked by a shared **document ID** (Skill 1.4.1).
+- **Default managed answer = Bedrock Knowledge Bases.** The real decision is the store underneath: **OpenSearch Serverless** (hybrid, ms latency, high QPS) vs **S3 Vectors** (cheapest, semantic-only) vs **Aurora pgvector** (SQL joins) vs **Neptune Analytics** (GraphRAG) → decision table in Skill 1.4.1.
+- ⚠️ **KB vector store, embedding model, chunking and parser are fixed at creation** → changing one means a new KB/data source and re-ingest (Skills 1.4.1, 1.4.5).
+- **DynamoDB has no native vector search** → pair it with a vector store, or use **zero-ETL to OpenSearch** (Skill 1.4.1).
+- **Metadata makes retrieval precise:** KBs read the **`.metadata.json` sidecar**, not S3 user metadata or tags → generate the sidecar, re-sync, filter at query time; build ACL filters **server-side** (Skill 1.4.2).
+- **Topic segmentation:** OpenSearch **Neural plugin** embeds via Bedrock at ingest and query time; index per topic vs topic field + filter (Skill 1.4.1).
+- **Scale (managed OpenSearch):** primary shards are **fixed at index creation**, replicas aren't; HNSW lives in **off-heap memory** → size RAM or quantize. Serverless = OCUs, no shards (Skill 1.4.3).
+- **Multi-index and two-stage indexing** shrink the search space; route by app context, classifier or agent (Skill 1.4.3).
+- **Connectors:** native KB connectors (S3, Web Crawler, Confluence, SharePoint, Salesforce, custom) with credentials in **Secrets Manager**; AppFlow / DataSync / Lambda / Q Business for the rest (Skill 1.4.4).
+- **Freshness:** incremental sync vs direct ingestion vs scheduled refresh vs blue/green rebuild → choose by required latency and what changed (Skill 1.4.5).
 
 ## Notes
 
@@ -43,18 +41,22 @@
 - Design question: **"Which store, how is it organised, and what's around it?"** (catalog, metadata, sync, access control).
 
 #### Vector store options on AWS — decision table
+This is the home comparison for store choice; [Task 1.5 · Skill 1.5.3](05-task-1.5-retrieval-mechanisms.md#skill-153--deploying-and-configuring-vector-search--pq36) covers configuring search on the chosen store.
+
+- **Bedrock Knowledge Bases is the managed layer, not a store.** It gives the lowest effort (managed ingestion, chunking, embedding, retrieval, citations) and query features such as semantic or hybrid search (store-dependent), metadata filters, reranking and query decomposition. Scale and latency depend on the backing store. Cue words: *"least operational overhead"*, *"managed RAG"*, *"citations"*.
+- KB can **quick-create** an OpenSearch Serverless collection/index or an S3 Vectors bucket/index, or you **bring your own** store and provide the field mappings (vector, text, metadata), with credentials in **Secrets Manager** where needed.
 
 | Store | Strengths | Limits / gotchas | Choose when |
 | --- | --- | --- | --- |
 | **Bedrock KB + OpenSearch Serverless** (vector search collection) | Fully managed, **hybrid search** (semantic + keyword), ms latency, scales in OCUs, KB quick-create | Minimum OCU baseline cost even when idle (verify current minimums); no shard control; metadata filtering on a KB index needs **FAISS** engine | Default production RAG with hybrid search and high QPS |
 | **Bedrock KB + S3 Vectors** | **Lowest cost** (up to ~90% cheaper), pay-per-use, huge scale, KB quick-create | **Semantic only** (no hybrid), subsecond rather than ms latency; filterable metadata **2 KB**, total **40 KB** per vector | Large or archival corpora, cost-sensitive, latency-tolerant |
-| **OpenSearch Service (managed cluster)** | Full control: shards, instance types, engines (FAISS/Lucene), **Neural plugin**, search pipelines, quantization, disk-based vectors | You run capacity, upgrades and shard design | Very large scale, custom tuning, existing OpenSearch estate |
-| **Aurora PostgreSQL / RDS for PostgreSQL + pgvector** | SQL + vectors in one DB; **joins** with relational metadata/ACL tables; HNSW and IVFFlat indexes; KB-supported (Aurora) | Vertical scaling limits; you tune indexes; KB needs a specific table schema | Team already on Postgres; transactional metadata; strong relational needs |
+| **OpenSearch Service (managed cluster)** | Full control: shards, instance types, engines (FAISS/Lucene), **Neural plugin**, search pipelines, quantization, disk-based vectors. Search types (managed or Serverless): k-NN (exact/ANN), BM25, **hybrid**, neural sparse, aggregations, filtering; billions of vectors at **ms latency** | You run capacity, upgrades and shard design | Very large scale, high QPS, fine control over k-NN, existing OpenSearch estate |
+| **Aurora PostgreSQL / RDS for PostgreSQL + pgvector** | SQL + vectors in one DB; **joins**, WHERE and transactions with relational metadata/ACL tables; full-text via `tsvector`; HNSW and IVFFlat indexes; KB-supported (Aurora) | Vertical scaling limits (millions of vectors comfortably; scale with instance size and read replicas); you tune indexes; KB needs a specific table schema | Team already on Postgres; vectors next to transactional data; SQL filtering/joins |
 | **Neptune Analytics** | Graph + vector; **GraphRAG** in KB; multi-hop over entities and relationships | Graph modelling effort | Questions that need relationship traversal (root cause, compliance lineage) |
 | **Amazon DocumentDB** (vector search) | JSON documents + vectors in a MongoDB-compatible store | Not a KB-native store (verify) | Existing DocumentDB apps |
 | 🎯 **PQ23** **MemoryDB / ElastiCache (Valkey/Redis OSS) vector search** | In-memory, **single-digit-ms**, high throughput | RAM cost; dataset must fit in memory | Ultra-low latency, **semantic cache**, real-time recommendations |
 | **DynamoDB** | Serverless key-value store for **metadata, document state, chat history** | **No native vector search** | Catalog and state alongside a separate vector store, or zero-ETL to OpenSearch |
-| **Kendra GenAI index** | Managed enterprise search with many connectors; can back a KB | Kendra pricing model | Enterprise search with connectors, minimal ML work |
+| **Kendra GenAI index** | Managed enterprise search with many connectors; its own `Retrieve` API returns passages with no vector DB to manage; can back a KB | Kendra pricing model | Enterprise search with connectors, minimal ML work |
 | Third-party: **Pinecone, MongoDB Atlas, Redis Enterprise Cloud** | KB-supported | External account, credentials in Secrets Manager | Org standard is already one of these |
 
 #### Pattern A — Bedrock Knowledge Bases for hierarchical organisation
@@ -136,25 +138,7 @@ GET /kb-legal/_search
   - in the **same Aurora PostgreSQL** database via **pgvector**, so one SQL query does `vector distance + JOIN on ACL/metadata`, or
   - in a separate vector store keyed by `doc_id`/`chunk_id`.
 - Flow: upload to S3 → event → Lambda writes the catalog row → chunk and embed → write vectors with `doc_id` → at query time, filter by user groups (SQL) and rank by similarity.
-- Aurora as a **KB vector store** requires a pre-created table with (verify exact names in the docs):
-  - an `id` (uuid primary key), an `embedding vector(<dims>)` column, a `chunks text` column, a `metadata json` column, and optionally custom metadata columns for filtering
-  - an **HNSW index** on the embedding column (for example `vector_cosine_ops`)
-  - the **RDS Data API** enabled, with credentials in **Secrets Manager**
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE TABLE bedrock_kb.chunks (
-  id uuid PRIMARY KEY,
-  embedding vector(1024),
-  chunks text,
-  metadata json,
-  department text          -- custom metadata column for filtering
-);
-CREATE INDEX ON bedrock_kb.chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX ON bedrock_kb.chunks USING gin (to_tsvector('simple', chunks)); -- text search
-```
-
-- pgvector index choice: **HNSW** gives better recall and latency but builds slower and uses more memory. **IVFFlat** builds faster with less memory, needs data present before building (lists), and has lower recall.
+- Aurora can also be the **KB vector store** itself. The pre-created table schema, Data API and Secrets Manager requirements, and the HNSW vs IVFFlat index choice are in [Task 1.5 · Skill 1.5.3](05-task-1.5-retrieval-mechanisms.md#skill-153--deploying-and-configuring-vector-search--pq36).
 
 #### Pattern D — DynamoDB with vector databases for metadata and embeddings
 - **DynamoDB** is the **fast, serverless metadata/state layer**: document registry, chunk → source mapping, ingestion checkpoints, content hashes for change detection, per-tenant config, **conversation history**.
@@ -177,14 +161,6 @@ CREATE INDEX ON bedrock_kb.chunks USING gin (to_tsvector('simple', chunks)); -- 
 ### Skill 1.4.2 — Metadata frameworks for search precision and context awareness 🎯 PQ40
 
 > *Develop comprehensive metadata frameworks to improve search precision and context awareness for FM interactions (for example, by using S3 object metadata for document timestamps, custom attributes for authorship information, tagging systems for domain classification).*
-
-> [!IMPORTANT]
-> **🎯 Practice question 40 — KB searches too many content types and time ranges: slow and irrelevant, minimal change**
->
-> - **Turn on metadata filtering in the existing Bedrock KB.** Attach metadata (content type, date, category) to each S3 document, and pass **filters at query time** (`equals`, `in`, `greaterThan` on a date…). The candidate set shrinks **before** vector scoring, so results are faster and more relevant.
-> - ❌ **Moving to OpenSearch Service or Serverless:** re-platforming and re-indexing, when the KB already filters natively.
-> - ❌ **A domain-adapted embedding model:** the question rules out fine-tuning, and the problem is **scope**, not embedding quality.
-> - ⚠️ **Detail:** the answer key says "index S3 object metadata". In practice KBs read filterable metadata from the **`<file>.metadata.json` sidecar** (see the key points above), not from S3 user-defined metadata or tags. Same idea, but use the sidecar in the real setup, and re-sync after adding it.
 
 #### What metadata does in RAG
 - **Pre-filtering narrows the search space**, giving fewer but more relevant candidates and higher precision. ("2024 policy only", "only docs I'm allowed to see".)
@@ -263,8 +239,16 @@ resp = bedrock_agent_runtime.retrieve(
         ]}}})
 ```
 
-- **Implicit metadata filtering:** the KB can use an FM to **derive filters from the natural-language query** ("2023 legal contracts" → `year=2023 AND department=legal`), given a schema describing the metadata keys. Use it when users won't select filters themselves.
+- **Implicit metadata filtering:** the KB can use an FM to **derive filters from the natural-language query** ("2023 legal contracts" → `year=2023 AND department=legal`), given a schema describing the metadata keys. Use it when users won't select filters themselves. Configuration (`implicitFilterConfiguration`) is in [Task 1.5 · Skill 1.5.5](05-task-1.5-retrieval-mechanisms.md#skill-155--query-handling-systems-expansion-decomposition-transformation).
 - **Security filtering:** build the filter **server-side from the authenticated identity** (Cognito/IdP group claims), never from user-supplied input. Metadata ACL filtering is a **retrieval-time control**. Index or KB separation per tenant is a **stronger isolation** boundary.
+
+> [!IMPORTANT]
+> **🎯 Practice question 40 — KB searches too many content types and time ranges: slow and irrelevant, minimal change**
+>
+> - **Turn on metadata filtering in the existing Bedrock KB.** Attach metadata (content type, date, category) to each S3 document, and pass **filters at query time** (`equals`, `in`, `greaterThan` on a date…). The candidate set shrinks **before** vector scoring, so results are faster and more relevant.
+> - ❌ **Moving to OpenSearch Service or Serverless:** re-platforming and re-indexing, when the KB already filters natively.
+> - ❌ **A domain-adapted embedding model:** the question rules out fine-tuning, and the problem is **scope**, not embedding quality.
+> - ⚠️ **Detail:** the answer key says "index S3 object metadata". In practice KBs read filterable metadata from the **`<file>.metadata.json` sidecar** (see the S3 metadata vs sidecar table above), not from S3 user-defined metadata or tags. Same idea, but use the sidecar in the real setup, and re-sync after adding it.
 
 #### Multi-tenant isolation choices
 
@@ -453,6 +437,20 @@ File shares ─► DataSync ─► S3 raw ─────┘            │
   - Best for **near-real-time** freshness (seconds to minutes).
 - **Data deletion policy** on a data source: **Delete** (default; vectors are removed when the data source is deleted) vs **Retain**.
 
+#### Freshness strategy decision table
+
+| Requirement | Strategy |
+| --- | --- |
+| "Changes visible within seconds/minutes" | **Direct ingestion API** per document, or OpenSearch Ingestion / streaming upserts |
+| "Daily/nightly is fine" | **EventBridge Scheduler → StartIngestionJob** |
+| "Bursty uploads, avoid duplicate syncs" | **S3 → EventBridge → SQS batch → Lambda** (single job, check for a running job first) |
+| "SaaS wiki changes" | Native connector + scheduled incremental sync (+ webhooks for urgent updates) |
+| "Changed embedding model" | **Full re-index into a new KB/index + blue/green switch** |
+| "Deleted docs still appearing in answers" | Sync after delete / `DeleteKnowledgeBaseDocuments`; check data deletion policy; reconcile orphans |
+| "Avoid re-embedding unchanged content" | **Content hash** in a DynamoDB catalog; skip unchanged |
+
+The patterns below implement these strategies.
+
 #### Pattern 1 — Event-driven (real-time change detection)
 
 ```
@@ -509,7 +507,7 @@ S3 PutObject/DeleteObject ─► EventBridge rule ─► SQS (batch window, e.g.
 - Triggers: **new embedding model** or dimension, a chunking change, a mapping/shard change, corruption.
 - **Blue/green:**
   - **OpenSearch:** build `kb-hr-v8` in the background → validate (recall on a golden set) → **atomic alias swap** `kb-hr` → v8 → delete v7 later.
-  - **Bedrock KB:** create a **new KB** (because embedding model, chunking and vector store are immutable) → ingest → evaluate → switch the KB ID in config (**AppConfig** / Parameter Store) → retire the old KB, its vector index and its role.
+  - **Bedrock KB:** create a **new KB** (because embedding model, chunking, parser and vector store are immutable) → ingest → evaluate → switch the KB ID in config (**AppConfig** / Parameter Store) → retire the old KB, its vector index and its role.
 - ⚠️ **Never mix embeddings from two models in one index.** Query vectors from model B are meaningless against document vectors from model A.
 
 #### Data accuracy and quality controls
@@ -518,18 +516,6 @@ S3 PutObject/DeleteObject ─► EventBridge rule ─► SQS (batch window, e.g.
 - **Conflict handling:** keep `effective_date` / `version` metadata, filter to the latest version, or tell the FM in the prompt that **newest wins**.
 - **Ingestion failure triage:** unsupported formats, files over the size limit (KB S3 files **under 50 MB**), encrypted files without a KMS grant, **dimension mismatch**, throttling on the embedding model. Find them in KB logs, `GetIngestionJob` failure reasons and the DLQ.
 - **Right to erasure / revoked access:** delete at the source, then sync or call `DeleteKnowledgeBaseDocuments`, and verify with a `Retrieve` that filters on the source URI. Also purge caches (semantic cache, conversation memory).
-
-#### Freshness strategy decision table
-
-| Requirement | Strategy |
-| --- | --- |
-| "Changes visible within seconds/minutes" | **Direct ingestion API** per document, or OpenSearch Ingestion / streaming upserts |
-| "Daily/nightly is fine" | **EventBridge Scheduler → StartIngestionJob** |
-| "Bursty uploads, avoid duplicate syncs" | **S3 → EventBridge → SQS batch → Lambda** (single job, check for a running job first) |
-| "SaaS wiki changes" | Native connector + scheduled incremental sync (+ webhooks for urgent updates) |
-| "Changed embedding model" | **Full re-index into a new KB/index + blue/green switch** |
-| "Deleted docs still appearing in answers" | Sync after delete / `DeleteKnowledgeBaseDocuments`; check data deletion policy; reconcile orphans |
-| "Avoid re-embedding unchanged content" | **Content hash** in a DynamoDB catalog; skip unchanged |
 
 ---
 

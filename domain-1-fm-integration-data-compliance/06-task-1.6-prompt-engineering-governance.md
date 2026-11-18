@@ -12,28 +12,16 @@
 > - **Skill 1.6.6** · Complex prompt systems (Bedrock Prompt Flows: chains, conditional branching, reusable components, pre/post-processing)
 
 ## Key points
-- **Three control layers**, not one: **system prompt / Prompt Management template** (role, rules, format) → **Bedrock Guardrails** (enforced policy, model-independent, on input *and* output) → **post-processing validation** (Lambda/JSON Schema). A system prompt alone is **bypassable** — anything "must be enforced" / "regardless of prompt" → **Guardrails**.
-- **Bedrock Prompt Management** = central catalogue of prompts with `{{variables}}`, model + inference config, optional tools; **DRAFT → immutable numbered versions**; invoke by passing the **prompt ARN (optionally `:version`) as `modelId`** to **Converse / ConverseStream / InvokeModel** with `promptVariables`. Change prompts **without redeploying code**.
-- **Approval workflow** isn't a single button: build it from **versions + IAM (who can `CreatePromptVersion` / edit DRAFT) + CI/CD (CodePipeline manual approval) + Git/S3 template repo**. Apps pin a **specific version ARN** → only approved versions reach production.
-- **Audit**: **CloudTrail** = *who* called which API (`CreatePrompt`, `CreatePromptVersion`, `InvokeModel`, `Converse`) and when · **Bedrock model invocation logging** → **CloudWatch Logs and/or S3** = the *full prompt and response bodies* (off by default) · **CloudWatch metrics** (`Invocations`, `InvocationLatency`, `InputTokenCount`, `OutputTokenCount`, Guardrail `InvocationsIntervened`).
-- **Conversation state**: FMs are **stateless** — the app resends history every turn. Store history in **DynamoDB** (PK = `session_id`, SK = timestamp/turn, **TTL** for expiry) or use **Bedrock Session Management APIs**/**AgentCore Memory**; **summarise or window** old turns to stay inside the context window and control cost.
-- **Clarification loop** → **Step Functions**: classify intent (**Comprehend custom classifier** or a cheap FM) → missing slots? → ask user → **`.waitForTaskToken`** callback (Standard workflow, can wait up to 1 year) → resume. Plain conversational slot filling with voice/chat channels → **Amazon Lex**.
-- 🎯 **PQ33** **Prompt QA = treat prompts like code**: golden dataset → run each prompt version → **deterministic checks in Lambda** (JSON parses, schema, regex, required fields, length) + **LLM-as-a-judge / Bedrock Evaluations** for semantics → publish pass-rate as a **CloudWatch custom metric** → **alarm on regression** → block promotion.
-- **Refinement levers** (cheapest first): clearer instructions + **delimiters/XML** → **output format spec / JSON schema / tool-use for structured output** → **few-shot** → **CoT** ("think step by step", `<thinking>` then `<answer>`) or **extended thinking** → **prompt chaining** → **feedback loop** (thumbs up/down → dataset → re-evaluate) → only then RAG / fine-tuning.
-- **Bedrock Flows** (a.k.a. Prompt Flows) = low-code DAG of nodes: **Input/Output, Prompt, Agent, Knowledge base, Lambda, Inline code, Lex, S3 storage/retrieval, Condition, Iterator/Collector, DoWhile loop**. Versions are immutable; apps call **`InvokeFlow` with flow ID + alias ID**; rollback = repoint the alias.
-- **Choose the orchestrator**: simple prompt chain / branching on model output, low-code → **Flows** · long-running, human approval, retries/catch, many AWS service integrations → **Step Functions** · autonomous tool choice → **Agents / AgentCore** · simple sequential code → **Lambda + Converse**.
-- **Reusability**: shared prompt in **Prompt Management** referenced by many Flows' Prompt nodes; template text in **S3/Git**; shared logic as **Lambda** nodes; nested Step Functions workflows. Change once, version, roll out.
-- Exam tie-breakers: "least operational overhead" → managed (**Prompt Management, Flows, Guardrails, Session Management**) · "full prompt/response audit" → **model invocation logging** (not CloudTrail) · "who changed a prompt" → **CloudTrail**.
-
-> [!IMPORTANT]
-> **🎯 Practice question 33 — zero-touch prompt promotion: better in 5 languages, lower variance, compliance checks, in CI/CD**
->
-> - **Bedrock Prompt Management** → **prompt versions** + **A/B comparison** (old vs new version).
-> - **Bedrock Evaluations with LLM-as-a-judge** → **automated** scores for accuracy, consistency and compliance (custom metrics such as "discloses fees and investment risk"), run **per language** on a golden dataset → **auditable evaluation reports** in S3.
-> - **A Bedrock Flow** runs the test set across languages and is called from the **existing CI/CD pipeline** as the promotion gate. Promote only if every threshold passes.
-> - ❌ **SageMaker Canvas + weekly meetings:** manual, and not built for prompt evaluation.
-> - ❌ **Amplify + crowd voting + Comprehend sentiment:** not automated, and sentiment ≠ accuracy.
-> - ❌ **S3 versioning + Lambda scoring + QuickSight:** custom build with no prompt comparison or managed evaluation.
+- **Three control layers:** system prompt / Prompt Management template (guidance) → **Guardrails** (enforcement, input and output) → **post-validation** (Lambda / JSON Schema). "Must be enforced regardless of prompt" → **Guardrails** (Skill 1.6.1).
+- **Prompt Management** = central, versioned prompts with `{{variables}}`; apps pass the **prompt ARN (+ version) as `modelId`**, so prompts change **without redeploying code** (Skills 1.6.1, 1.6.3).
+- **Reliable structure** → tool use with a JSON schema, then validate and retry (Skill 1.6.1).
+- **FMs are stateless:** the app resends history. Store it in **DynamoDB** (session key, TTL) or managed session/memory, and **summarise or window** old turns (Skill 1.6.2).
+- **Clarify, then resume:** classify intent (Comprehend or a cheap FM) → **Step Functions Standard + `.waitForTaskToken`** to wait for the user; voice/chat slot filling → **Lex** (Skill 1.6.2).
+- **Governance = versions + IAM + CI/CD approval + audit.** "Who changed it" → **CloudTrail**; "what exactly was sent and returned" → **model invocation logging** (Skill 1.6.3).
+- 🎯 **PQ33** **Prompt QA = treat prompts like code:** golden set → deterministic Lambda checks + LLM-as-a-judge → CloudWatch metric → alarm on regression → block promotion (Skill 1.6.4).
+- **Refine cheapest first:** clearer structure and delimiters → output spec → few-shot → CoT → chaining → feedback loop; then RAG or fine-tuning (Skill 1.6.5).
+- **Bedrock Flows** = low-code DAG of Prompt / KB / Agent / Lambda / Condition / Iterator nodes, deployed by **version + alias** (rollback = repoint alias). Long-running or human-approval chains → **Step Functions** (Skill 1.6.6).
+- Tie-breaker: "least operational overhead" → managed (**Prompt Management, Flows, Guardrails, Session Management**).
 
 ## Notes
 
@@ -74,7 +62,7 @@ Return JSON: {"answer": string, "sources": [string], "confidence": "high"|"mediu
 - Create a **prompt** resource containing: **system instructions**, **user message template**, optional **tool configuration**, **model ID**, **inference parameters** (temperature, topP, maxTokens, stop sequences), and **variables** written as `{{variable}}`.
 - 🎯 **PQ12** **Variants**: alternative versions of the same prompt (different wording / model / params) that you **compare side by side** in the console test window before choosing one.
 - Because the system prompt lives in the managed resource, **developers can't drift** from the approved role definition — the app only supplies variable values.
-- Invoke directly (no copy-paste of prompt text into code):
+- Invoke directly by passing the prompt ARN as `modelId` to **Converse / ConverseStream / InvokeModel** (no copy-paste of prompt text into code):
 ```python
 import boto3
 brt = boto3.client("bedrock-runtime")
@@ -99,17 +87,11 @@ resp = brt.converse(
 > - ❌ **DynamoDB templates + Lambda + Comprehend, or Step Functions validation:** custom orchestration that you have to maintain.
 
 #### Bedrock Guardrails — enforcing responsible-AI guidelines
-- Model-independent policies evaluated on **input (prompt)** and **output (response)**:
-  - **Content filters**: Hate, Insults, Sexual, Violence, Misconduct, **Prompt attack** (input only) · strength NONE/LOW/MEDIUM/HIGH · text and image.
-  - **Denied topics**: natural-language definitions + example phrases (e.g. "investment advice").
-  - **Word filters**: exact words/phrases + managed **profanity** list.
-  - **Sensitive information filters**: built-in PII types + **custom regex** → **BLOCK** or **MASK (anonymise)**.
-  - **Contextual grounding check**: **grounding** + **relevance** thresholds against a reference source → RAG hallucination control.
-  - **Automated Reasoning checks**: logically verify responses against formal policy rules.
-- 🎯 **PQ62** Attach to: `Converse`/`InvokeModel` (`guardrailIdentifier` + `guardrailVersion`), **Agents**, **Knowledge Bases**, **Flows** (Prompt / KB nodes) — or call **`ApplyGuardrail`** on any text, including **non-Bedrock / self-hosted models**.
-- **Selective evaluation**: wrap only the user input in **guard-content tags** (InvokeModel) or `guardContent` blocks (Converse) so the guardrail doesn't block your own system instructions or retrieved context.
-- Customisable **blocked messaging** for input vs output; versions are immutable (`DRAFT` → version 1, 2…), and apps pin a version.
-- Rule of thumb: **prompt = guidance, guardrail = enforcement**. The exam often offers "add instructions to the system prompt" as a distractor for a compliance requirement.
+- **Role in the framework:** Guardrails are the **enforced** layer. They are model-independent policies evaluated on **input and output**, which a system prompt alone can't guarantee. Rule of thumb: **prompt = guidance, guardrail = enforcement**. The exam often offers "add instructions to the system prompt" as a distractor for a compliance requirement.
+- **Map each framework rule to a policy:** forbidden subjects → **denied topics** · harmful categories → **content filters** (the **prompt attack** filter is input only) · exact terms and profanity → **word filters** · PII and custom regex → **sensitive information filters** (BLOCK or MASK) · RAG hallucination → **contextual grounding check** · formal policy rules → **Automated Reasoning checks**.
+- 🎯 **PQ62** Attach the same pinned guardrail version everywhere the framework runs: `Converse`/`InvokeModel` (`guardrailIdentifier` + `guardrailVersion`), **Agents**, **Knowledge Bases**, **Flows** (Prompt / KB nodes), or **`ApplyGuardrail`** for **non-Bedrock / self-hosted models**.
+- **Selective evaluation:** wrap only the user input in **guard-content tags** (InvokeModel) or `guardContent` blocks (Converse), so the guardrail doesn't block your own system instructions or retrieved context.
+- → Full detail (filter strengths, image filters, blocked messaging, versions, streaming): [Task 3.1 · Skill 3.1.1](../domain-3-ai-safety-security-governance/01-task-3.1-input-output-safety-controls.md#skill-311--content-safety-systems-for-harmful-user-inputs); grounding in [Skill 3.1.3](../domain-3-ai-safety-security-governance/01-task-3.1-input-output-safety-controls.md#skill-313--accuracy-verification-systems-to-reduce-hallucinations).
 
 > [!IMPORTANT]
 > **🎯 Practice question 62 — kids' history tutor (flow + KB, temperature 0.7) gives inaccurate and violent answers**
@@ -195,7 +177,7 @@ StartChat ──► DetectIntent (Lambda → Comprehend / Bedrock)
            └─ no  ─► LoadHistory (DynamoDB GetItem/Query)
                        └─► Retrieve (KB) ─► Generate (Bedrock) ─► SaveTurn (DynamoDB PutItem) ─► Respond
 ```
-- **`.waitForTaskToken`**: Step Functions pauses and hands a **task token** to the front end/queue; when the user replies, the backend calls **`SendTaskSuccess`** with the token and answer → workflow resumes. Use **Standard workflows** (Express workflows don't support `.waitForTaskToken` callback, and run max 5 minutes).
+- **`.waitForTaskToken`**: Step Functions pauses and hands a **task token** to the front end/queue; when the user replies, the backend calls **`SendTaskSuccess`** with the token and answer → workflow resumes. Use **Standard workflows** (they can wait up to 1 year; Express workflows don't support `.waitForTaskToken` callback, and run max 5 minutes). → Full detail: [Task 2.1 · Skill 2.1.5](../domain-2-implementation-integration/01-task-2.1-agentic-ai-tool-integrations.md#skill-215--collaborative-ai-human--fm)
 - Add a **loop counter** (max 2–3 clarifications) then fall back to a human agent → avoids infinite loops and user frustration.
 - Optimised integrations: Step Functions can call **Bedrock `InvokeModel` directly** (`arn:aws:states:::bedrock:invokeModel`), DynamoDB `GetItem/PutItem/Query` via SDK integrations, Comprehend via AWS SDK integration → fewer Lambdas.
 - **Human-in-the-loop** (approval of a sensitive action, low-confidence answer review) uses the same callback pattern; **Amazon A2I** for structured human review tasks.
@@ -211,17 +193,23 @@ StartChat ──► DetectIntent (Lambda → Comprehend / Bedrock)
 
 > *Implement comprehensive prompt management and governance systems to ensure consistency and oversight of FM operations (for example, by using Amazon Bedrock Prompt Management to create parameterized templates and approval workflows, Amazon S3 to store template repositories, AWS CloudTrail to track usage, Amazon CloudWatch Logs to log access).*
 
-> [!IMPORTANT]
-> **🎯 Practice question 45 — healthcare, per-country retention, consistent terminology adapted to local patients, approval of prompt changes**
->
-> - **Bedrock model invocation logging → CloudWatch Logs, exported or delivered to S3.** It captures the **prompt, response and request metadata (user context)**. Set **S3 retention or lifecycle per country** (for example 2 years).
-> - **Bedrock Prompt Management:** **parameterised templates** keep the clinical wording fixed, with **variables** for local or demographic context. **Versioning + an approval workflow** (only approved versions get deployed).
-> - ❌ **CloudTrail:** records **who called the API**, **not prompt or response content**.
-> - ❌ **Lambda-built prompts + SQS "approval":** adds latency, and SQS isn't an approval workflow.
-> - ❌ **S3 Object Lock as prompt versioning + EventBridge as logging:** no parameterisation, and EventBridge doesn't log invocations.
-
 #### Why govern prompts
 - Prompts are **production logic**: a one-word change can alter compliance, cost (tokens) and accuracy. Need **versioning, review, rollback, audit, access control and consistency** across teams.
+
+#### Governance decision table
+
+| Requirement | Answer |
+| --- | --- |
+| Who modified a template / when | **CloudTrail** |
+| Exact prompt + completion text for audit | **Model invocation logging → S3/CloudWatch Logs** |
+| Immutable history with rollback | **Prompt Management versions** (+ S3 Versioning) |
+| Swap prompt version without redeploy | Prompt ARN version in **AppConfig/Parameter Store** |
+| Human approval before production | **CodePipeline manual approval** / Step Functions callback |
+| Regulated WORM retention of templates/logs | **S3 Object Lock** |
+| Mask PII in logs | **CloudWatch Logs data protection** / Guardrails sensitive info filter |
+| Detect config drift / non-compliant resources | **AWS Config** rules |
+
+The subsections below build each of these controls.
 
 #### Parameterised templates (Prompt Management)
 - Variables `{{customer_name}}`, `{{policy_text}}`, `{{question}}` → the same reviewed template serves every request; inputs are inserted, not concatenated ad hoc → consistency + easier injection defence (delimit variables).
@@ -263,20 +251,17 @@ StartChat ──► DetectIntent (Lambda → Comprehend / Bedrock)
 - **Bedrock model invocation logging** (account/Region setting, **disabled by default**): logs **request + response bodies, model ID, token counts, identity** to **CloudWatch Logs** and/or **S3** (large payloads/images go to S3). Enable for audit, debugging, building evaluation datasets.
   - Protect logs: KMS, restricted IAM, **CloudWatch Logs data protection policies** to mask PII in log events, retention periods.
 - **Application logs** (Lambda) → CloudWatch Logs with **structured JSON**: `prompt_id`, `prompt_version`, `session_id`, `user_id`, latency, tokens, guardrail action → **Logs Insights** queries ("which prompt version produces most guardrail interventions?").
-- **CloudWatch metrics** (namespace `AWS/Bedrock`): `Invocations`, `InvocationLatency`, `InvocationClientErrors`, `InvocationServerErrors`, `InvocationThrottles`, `InputTokenCount`, `OutputTokenCount`; Guardrails publish intervention metrics.
+- **CloudWatch metrics** (`AWS/Bedrock`: invocations, latency, errors, throttles, token counts; Guardrails publish intervention metrics) give usage trends per model. → Full detail: [Task 4.3 · Skill 4.3.2](../domain-4-operational-efficiency-optimization/03-task-4.3-monitoring-observability.md#skill-432--comprehensive-genai-monitoring-and-kpis)
 
-#### Governance decision table
+> [!IMPORTANT]
+> **🎯 Practice question 45 — healthcare, per-country retention, consistent terminology adapted to local patients, approval of prompt changes**
+>
+> - **Bedrock model invocation logging → CloudWatch Logs, exported or delivered to S3.** It captures the **prompt, response and request metadata (user context)**. Set **S3 retention or lifecycle per country** (for example 2 years).
+> - **Bedrock Prompt Management:** **parameterised templates** keep the clinical wording fixed, with **variables** for local or demographic context. **Versioning + an approval workflow** (only approved versions get deployed).
+> - ❌ **CloudTrail:** records **who called the API**, **not prompt or response content**.
+> - ❌ **Lambda-built prompts + SQS "approval":** adds latency, and SQS isn't an approval workflow.
+> - ❌ **S3 Object Lock as prompt versioning + EventBridge as logging:** no parameterisation, and EventBridge doesn't log invocations.
 
-| Requirement | Answer |
-| --- | --- |
-| Who modified a template / when | **CloudTrail** |
-| Exact prompt + completion text for audit | **Model invocation logging → S3/CloudWatch Logs** |
-| Immutable history with rollback | **Prompt Management versions** (+ S3 Versioning) |
-| Swap prompt version without redeploy | Prompt ARN version in **AppConfig/Parameter Store** |
-| Human approval before production | **CodePipeline manual approval** / Step Functions callback |
-| Regulated WORM retention of templates/logs | **S3 Object Lock** |
-| Mask PII in logs | **CloudWatch Logs data protection** / Guardrails sensitive info filter |
-| Detect config drift / non-compliant resources | **AWS Config** rules |
 
 ---
 
@@ -332,6 +317,16 @@ PR changes template ─► CodeBuild: lint + unit (deterministic) tests
      ─► Manual approval ─► CreatePromptVersion ─► AppConfig canary 10% ─► 100%
      ─► Alarm triggers rollback to previous version
 ```
+
+> [!IMPORTANT]
+> **🎯 Practice question 33 — zero-touch prompt promotion: better in 5 languages, lower variance, compliance checks, in CI/CD**
+>
+> - **Bedrock Prompt Management** → **prompt versions** + **A/B comparison** (old vs new version).
+> - **Bedrock Evaluations with LLM-as-a-judge** → **automated** scores for accuracy, consistency and compliance (custom metrics such as "discloses fees and investment risk"), run **per language** on a golden dataset → **auditable evaluation reports** in S3.
+> - **A Bedrock Flow** runs the test set across languages and is called from the **existing CI/CD pipeline** as the promotion gate. Promote only if every threshold passes.
+> - ❌ **SageMaker Canvas + weekly meetings:** manual, and not built for prompt evaluation.
+> - ❌ **Amplify + crowd voting + Comprehend sentiment:** not automated, and sentiment ≠ accuracy.
+> - ❌ **S3 versioning + Lambda scoring + QuickSight:** custom build with no prompt comparison or managed evaluation.
 
 #### Gotchas
 - Set **temperature low (0)** for regression tests to reduce noise; or run multiple samples and average.
@@ -461,6 +456,7 @@ FlowInput {ticket}
 #### Reusable prompt components
 - Define common prompts **once** in **Prompt Management** (e.g. "summarise", "translate", "classify-intent") and reference them from many flows → update centrally, version-pin per flow.
 - Shared **Lambda** nodes for validation/formatting; shared **KBs**; shared **guardrails**.
+- Outside Flows, **nested Step Functions workflows** play the same role for shared logic.
 - Flows themselves are reusable via **versions + aliases** and can be called from apps or other orchestrators (`InvokeFlow`).
 
 #### Deploying and operating Flows
@@ -470,14 +466,8 @@ FlowInput {ticket}
 - Multi-turn within a flow is possible for nodes like Agent that ask for more input (verify current "multi-turn conversation" support in docs).
 
 #### Choosing the orchestration tool
-| Need | Best fit |
-| --- | --- |
-| Low-code chain of prompts/KB/Lambda, branching on content, business users can edit | **Bedrock Flows** |
-| Long-running (hours–days), human approval, callbacks, rich retry/catch, 200+ AWS integrations, exactly-once audit history | **Step Functions (Standard)** |
-| High-volume short chains (< 5 min) | **Step Functions Express** |
-| Model decides which tools to call, open-ended tasks | **Bedrock Agents / AgentCore / Strands** |
-| Code-first chaining inside an app | **LangChain/LangGraph** or Lambda + Converse |
-| Large offline prompt runs | **Bedrock batch inference** |
+- **Flows** fit low-code chains of prompts / KB / Lambda with branching on content, which business users can edit. Move to **Step Functions Standard** for long-running (hours–days) work, human approval and callbacks, rich retry/catch, 200+ AWS integrations and exactly-once audit history; **Express** for high-volume short chains (< 5 min). Use **Agents / AgentCore / Strands** when the model decides which tools to call, **LangChain/LangGraph or Lambda + Converse** for code-first chaining, and **Bedrock batch inference** for large offline prompt runs.
+- → Full detail: [Task 2.5 · Skill 2.5.5](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md#skill-255--advanced-genai-applications)
 
 #### Gotchas
 - Every node = latency + cost; don't chain what one well-structured prompt can do reliably.

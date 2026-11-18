@@ -10,28 +10,15 @@
 > - **Skill 1.3.4**: Improving input quality (Bedrock reformatting, Amazon Comprehend entity extraction, Lambda normalisation)
 
 ## Key points
-- **Garbage in, garbage out.** FM answer quality is capped by the quality of the input data, whether that's RAG documents, fine-tuning datasets, or prompts. Validate **before** you embed, train, or invoke. Validating afterwards costs you re-embedding, retraining, and lost user trust.
-- **AWS Glue Data Quality** is rule-based validation for structured/semi-structured data at scale. You write **DQDL** rules (`Completeness`, `IsUnique`, `ColumnValues`, `RowCount`, `DataFreshness`, `CustomSql`…). It can **recommend rules** for you, does **ML anomaly detection**, and publishes results to **CloudWatch/EventBridge**. It runs in the Data Catalog (data at rest) or inside Glue ETL jobs (data in flight).
-- **SageMaker Data Wrangler** (now inside SageMaker Canvas) is **visual, low-code** data prep with 300+ transforms and a **Data Quality and Insights report**. You can export a flow to a **SageMaker Processing job / Pipeline**. **Glue DataBrew** is the no-code equivalent for analysts.
-- Use **custom Lambda** for checks no managed tool covers: schema/JSON validation, token-count limits, PII presence, language detection, file type/size. Emit **CloudWatch custom metrics** (`PutMetricData` / EMF) and **alarm** on failure rates. Route bad records to a **quarantine S3 prefix or DLQ**.
-- **Route by modality.** Text goes straight in. **Audio → Amazon Transcribe** (text + timestamps + speakers). **Scanned docs/forms/tables → Textract** or **Bedrock Data Automation**. **Images → a multimodal FM** (Claude, Nova Lite/Pro) or Rekognition. **Video → Bedrock Data Automation** or Nova. **Tabular** gets serialised to Markdown/CSV/JSON, or sent through NL→SQL instead of being embedded.
-- **Bedrock Data Automation (BDA)** is a single managed service that extracts insights from **documents, images, audio and video**. It gives **standard output** or **custom output via blueprints**, and can act as the **parser for Knowledge Bases**.
-- **SageMaker Processing** runs **custom heavy/batch preprocessing** (your container, Spark/scikit-learn, GPUs) on managed, ephemeral clusters, reading from and writing to S3. For **large file fan-out**, use **Step Functions Distributed Map**. Lambda has a **15-min / 10 GB** limit.
-- **Converse API** is a single, model-agnostic shape: `messages[]` (alternating `user`/`assistant`, starting with `user`) with **content blocks** (`text`, `image`, `document`, `video`, `toolUse`, `toolResult`, `guardContent`), plus `system[]`, `inferenceConfig`, and `additionalModelRequestFields`. **InvokeModel** needs a **provider-specific JSON body**.
-- **SageMaker real-time endpoints** take `Body` + `ContentType`. The payload schema is set by the **container** (e.g. TGI/LMI `{"inputs": ..., "parameters": {...}}`). For large payloads or long runs, use **Async Inference**. For offline bulk work, use **Batch Transform**.
-- **Conversation formatting.** Send the **full history every turn**, because FMs are stateless. Persist it in **DynamoDB**. Keep within the context window with a **sliding window + summarisation**. Every `toolUse` must be answered by a matching `toolResult` (same `toolUseId`) in the **next user turn**.
-- **Improving input quality:** **Comprehend** for entities/key phrases/language/PII/sentiment (feeds metadata and routing), **Bedrock** to rewrite or restructure messy text, and **Lambda** to normalise (Unicode, whitespace, dates → ISO 8601, units, casing, boilerplate/HTML stripping, dedup).
-- 🎯 **PQ31** **Clean vs. redact.** **Redact PII before** embedding or fine-tuning (Comprehend `DetectPiiEntities` / Transcribe PII redaction / Macie for discovery in S3). Once PII is inside a vector store or model weights, it is very hard to remove.
-
-> [!IMPORTANT]
-> **🎯 Practice question 31 — messy financial documents + PII to redact → consistent FM inputs, LEAST overhead**
->
-> - **Amazon Textract** → analyses document **structure** (tables, forms, key-value pairs) and returns **structured, machine-readable text + metadata**, which fixes the formatting inconsistencies.
-> - **Amazon Comprehend PII detection and redaction** (built in, **no training**) → meets the PII policy before data reaches the FM.
-> - Use that **structured metadata in the prompt** → better reasoning and fewer hallucinations.
-> - ❌ **Macie:** *discovers and classifies* sensitive data in S3, but it's **not a document pre-processing or redaction step**.
-> - ❌ **Comprehend *custom* entity recognition:** you have to train and maintain models, when built-in PII detection already covers it.
-> - ❌ **Guardrails PII at inference:** filters during or after the call and **doesn't clean the input data**, which is the real cause.
+- **Garbage in, garbage out.** Answer quality is capped by input quality (RAG documents, fine-tuning data, prompts). Validate **before** you embed, train or invoke; fixing it afterwards means re-embedding, retraining and lost trust.
+- **Pick the validation tool by data type and user:** **Glue Data Quality** (DQDL rules, rule recommendations, ML anomaly detection) for tabular pipelines · **Data Wrangler** for data scientists · **DataBrew** for no-code analysts · **custom Lambda** for unstructured and GenAI-specific checks · **CloudWatch** metrics and alarms to track it all (Skill 1.3.1).
+- **Non-text data: convert to text, or process natively** with multimodal models and embeddings. Many designs do both (1.3.2).
+- **Route by modality:** audio → **Transcribe** · scanned docs/forms/tables → **Textract** or **Bedrock Data Automation** · images → **multimodal FM** · video → **BDA** / Nova or a frame + transcript pipeline · tables → **text-to-SQL**, not embedded rows (1.3.2).
+- **Scale out preprocessing:** heavy or custom work (GPU, Spark, >15 min) → **SageMaker Processing**; millions of S3 objects → **Step Functions Distributed Map** (1.3.2).
+- **Converse is the default request shape** (one schema, content blocks). Use **InvokeModel** for embeddings, image generation and model-native bodies. On **SageMaker**, the **container** defines the payload and you may have to apply the chat template yourself (1.3.3).
+- **Conversation formatting:** FMs are stateless, so re-send history every turn (persist it in DynamoDB), start with `user` and alternate roles, answer each `toolUse` with a matching `toolResult`, and trim with a sliding window + summary (1.3.3).
+- **Improve input in order of cost:** deterministic **Lambda** normalisation first → **Comprehend** for entities, language, PII and classification → a small **Bedrock** model only for what rules can't do (1.3.4).
+- **Redact PII before embedding or fine-tuning.** Once it's in a vector store or model weights it's very hard to remove (1.3.4).
 
 ## Notes
 
@@ -46,26 +33,17 @@
 
 - Reference pipeline (batch ingestion):
   1. **Land** raw data in S3 (raw zone). Trigger with **S3 Event Notifications → EventBridge**.
-  2. **Validate**: Glue Data Quality (structured), Lambda (files/JSON/token limits). Failed records go to a **quarantine prefix** + SNS alert.
+  2. **Validate**: Glue Data Quality (structured), Lambda (files/JSON/token limits). Failed records go to a **quarantine prefix** (or a DLQ) + SNS alert.
   3. **Extract/convert by modality**: Transcribe, Textract/BDA, multimodal FM for images, SageMaker Processing for custom work.
   4. **Enrich & normalise**: Comprehend entities → metadata, Lambda normalisation, Bedrock rewriting.
   5. **Write** to a curated zone in S3 (+ `.metadata.json` sidecars) → **KB sync** / embedding job / training job.
   6. **Monitor**: CloudWatch metrics (records processed/failed, DQ score) → alarms → dashboards.
 - Orchestration options: **Step Functions** (serverless, visual, retries/catch, Distributed Map for millions of S3 objects) · **Glue workflows** (Glue-centric ETL) · **SageMaker Pipelines** (ML-centric, lineage, ties to Model Registry) · **MWAA** (existing Airflow estates).
 - Medallion-style zones (raw → validated/clean → curated/enriched) make reprocessing and audits easy. Keep raw **immutable** and use S3 versioning.
+- ⚠️ Validating **after** embedding means you must re-embed and re-sync to fix issues, so validate upstream. Forgetting to **re-sync the KB** after changing documents or metadata sidecars leaves the KB serving stale data.
 
 ### Skill 1.3.1 — Data validation workflows 🎯 PQ44
 > *Create comprehensive data validation workflows to ensure data meets quality standards for FM consumption (for example, by using AWS Glue Data Quality, SageMaker Data Wrangler, custom Lambda functions, Amazon CloudWatch metrics).*
-
-> [!IMPORTANT]
-> **🎯 Practice question 44 — 5 TB a day of structured data: schema, anomalies, nulls, metrics, custom alerts, rules, LEAST complexity**
->
-> - **AWS Glue Data Quality** (serverless, scales) → **DQDL rules** for schema, completeness (nulls), uniqueness and value ranges, plus **ML anomaly detection**. Results are **published as metrics**.
-> - **SageMaker Data Wrangler** → explore and analyse the features.
-> - **Lambda** → **custom alerting logic**. **CloudWatch** → metrics, thresholds and alarms.
-> - ❌ **SageMaker Processing + Lambda + Step Functions:** batch jobs you have to orchestrate and tune.
-> - ❌ **Data Wrangler + Lambda without Glue DQ:** no managed rules engine, so it's custom code.
-> - ❌ **+ Firehose → OpenSearch dashboards:** extra infrastructure (shards, indexes) for no benefit.
 
 #### Data quality dimensions to validate
 | Dimension | Example check for GenAI data |
@@ -78,6 +56,29 @@
 | **Timeliness / freshness** | `last_updated` within N days, so RAG doesn't serve stale policy |
 | **Size / length** | Text length within chunk/token limits; files within service size limits |
 | **Safety / compliance** | No PII, secrets, or toxic content; licence/consent metadata present |
+
+#### Decision table — which validation tool?
+The tools below overlap, so choose by data type and by who does the work. Each is explained in the sections that follow.
+
+| Situation | Pick |
+| --- | --- |
+| Rule-based checks on tabular data in Glue ETL/catalog, alerts, scale | **Glue Data Quality** |
+| Analysts, no code, profile + clean | **Glue DataBrew** |
+| Data scientist exploring and preparing a fine-tuning/ML dataset visually, exporting to a pipeline | **SageMaker Data Wrangler** |
+| Unstructured files, JSONL schema, token limits, PII, language checks | **Custom Lambda** (+ Comprehend) |
+| Track quality over time, alert on degradation | **CloudWatch metrics + alarms** (+ Glue DQ anomaly detection) |
+| Human verification of labels/ground truth | **SageMaker Ground Truth / Amazon A2I** |
+| Discover PII sitting in S3 buckets before ingestion | **Amazon Macie** |
+
+> [!IMPORTANT]
+> **🎯 Practice question 44 — 5 TB a day of structured data: schema, anomalies, nulls, metrics, custom alerts, rules, LEAST complexity**
+>
+> - **AWS Glue Data Quality** (serverless, scales) → **DQDL rules** for schema, completeness (nulls), uniqueness and value ranges, plus **ML anomaly detection**. Results are **published as metrics**.
+> - **SageMaker Data Wrangler** → explore and analyse the features.
+> - **Lambda** → **custom alerting logic**. **CloudWatch** → metrics, thresholds and alarms.
+> - ❌ **SageMaker Processing + Lambda + Step Functions:** batch jobs you have to orchestrate and tune.
+> - ❌ **Data Wrangler + Lambda without Glue DQ:** no managed rules engine, so it's custom code.
+> - ❌ **+ Firehose → OpenSearch dashboards:** extra infrastructure (shards, indexes) for no benefit.
 
 #### AWS Glue Data Quality
 - Built on the open-source **Deequ** engine. Serverless and pay per DPU-hour.
@@ -158,17 +159,6 @@ def handler(event, _):
 - **Logs Insights** queries over validator logs help with root-cause analysis. **Dashboards** give pipeline health at a glance.
 - KB ingestion jobs also report **per-document failures** (e.g. unsupported file, too large). Check the ingestion job statistics/logs, and enable KB logging to CloudWatch Logs. *(Verify log delivery options in docs.)*
 
-#### Decision table — which validation tool?
-| Situation | Pick |
-| --- | --- |
-| Rule-based checks on tabular data in Glue ETL/catalog, alerts, scale | **Glue Data Quality** |
-| Analysts, no code, profile + clean | **Glue DataBrew** |
-| Data scientist exploring and preparing a fine-tuning/ML dataset visually, exporting to a pipeline | **SageMaker Data Wrangler** |
-| Unstructured files, JSONL schema, token limits, PII, language checks | **Custom Lambda** (+ Comprehend) |
-| Track quality over time, alert on degradation | **CloudWatch metrics + alarms** (+ Glue DQ anomaly detection) |
-| Human verification of labels/ground truth | **SageMaker Ground Truth / Amazon A2I** |
-| Discover PII sitting in S3 buckets before ingestion | **Amazon Macie** |
-
 ### Skill 1.3.2 — Processing complex data types (text, image, audio, tabular)
 > *Create data processing workflows to handle complex data types including text, image, audio, and tabular data with specialized processing requirements for FM consumption (for example, by using Amazon Bedrock multimodal models, SageMaker Processing, AWS Transcribe, advanced multimodal pipeline architectures).*
 
@@ -186,7 +176,7 @@ def handler(event, _):
 | **Audio** | **Amazon Transcribe** (batch or streaming) · **BDA** (audio summaries/transcripts) | Speaker diarization, custom vocabulary, PII redaction |
 | 🎯 **PQ13** **Video** | **BDA** (scene summaries, transcripts, chapters, logos, text-in-video) · **Nova Lite/Pro** video understanding · Rekognition Video | Frame sampling + transcript if building custom |
 | **Tabular / structured** | Glue/SageMaker Processing to serialise · **KB structured data (NL→SQL over Redshift)** · Athena | Don't blindly embed numeric rows; use text-to-SQL for aggregation |
-| **Multilingual** | **Comprehend** language detection → **Amazon Translate** | Or use a multilingual embedding model (Cohere Embed multilingual / v4) |
+| **Multilingual** | **Comprehend** language detection → **Amazon Translate** | Or use a multilingual embedding model (Cohere Embed multilingual / v4). Embedding with a model that doesn't support the language gives poor retrieval |
 | **Medical text/audio** | **Comprehend Medical**, **Transcribe Medical** / HealthScribe | Domain entities (medications, conditions), HIPAA-eligible |
 
 > [!WARNING]
@@ -220,12 +210,8 @@ def handler(event, _):
 #### Amazon Textract & Bedrock Data Automation (documents)
 - **Textract APIs**: `DetectDocumentText` (OCR lines/words) · `AnalyzeDocument` with `FORMS` (key-value pairs), `TABLES` (cells/merged cells), `QUERIES` (ask "What is the policy number?"), `SIGNATURES`, `LAYOUT` (titles, headers, paragraphs, lists, which helps with structure-aware chunking) · `AnalyzeExpense` (invoices/receipts) · `AnalyzeID` (identity docs) · `AnalyzeLending`.
 - Synchronous APIs are for single-page images. **Multi-page PDFs/TIFFs** need the **async** `Start*` APIs + SNS completion notification.
-- **Bedrock Data Automation (BDA)**:
-  - Handles **documents, images, audio, video** with one API.
-  - **Standard output**: predefined insights per modality, e.g. document text/markdown with layout, image summaries, audio transcripts and summaries, video chapters and summaries.
-  - **Custom output with blueprints**: you define a schema of fields to extract (e.g. invoice number, total, line items). There's a blueprint catalogue, or you can generate one with natural language.
-  - Can be selected as the **parser in a Bedrock Knowledge Base** for multimodal content (tables, charts, images in docs).
-  - Exam cue: "extract structured fields from many doc types / multimodal content **without managing multiple services or prompts**" → **BDA**.
+- ⚠️ Lambda timeouts on large PDFs or long audio: use async Textract/Transcribe jobs + Step Functions waits (`.sync` / callback) instead of polling inside Lambda.
+- **Bedrock Data Automation (BDA)** handles **documents, images, audio and video** with one API: **standard output** (predefined insights per modality, e.g. document text/markdown with layout, audio transcripts, video chapters and summaries) or **custom output with blueprints** (your schema of fields, e.g. invoice number, total, line items; from the catalogue or generated with natural language). It can also be the **KB parser**. Exam cue: "extract structured fields from many doc types / multimodal content **without managing multiple services or prompts**" → **BDA**. → Full detail: [Task 2.5 · Skill 2.5.3](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md#skill-253--business-system-enhancements)
 - **KB parsing options**: **default parser** (text only, fastest/cheapest) · **Bedrock Data Automation** parser · **FM as parser** (e.g. Claude/Nova reads pages including tables/figures, with a customisable parsing prompt). FM/BDA parsing **costs more** but keeps table and figure meaning.
 
 #### Images with Bedrock multimodal FMs
@@ -269,7 +255,7 @@ S3 (raw) ──EventBridge──► Step Functions
 ```
 - **Distributed Map** in Step Functions iterates over **millions of S3 objects** with high parallelism. Use it for backfills.
 - Use **SQS** between stages to buffer and absorb throttling (e.g. Bedrock/Transcribe quotas). Add **retry with exponential backoff** on `ThrottlingException`.
-- **Bedrock batch inference** (JSONL in S3 → JSONL out, asynchronous, **~50% cheaper than on-demand** for supported models) is the right choice for **bulk offline** captioning/summarisation/extraction. *(Discount and minimum record counts: verify in docs.)*
+- **Bedrock batch inference** (JSONL in S3 → JSONL out, asynchronous, **~50% cheaper than on-demand** for supported models) is the right choice for **bulk offline** captioning/summarisation/extraction. *(Discount and minimum record counts: verify in docs.)* → Batch inference detail: [Task 2.2 · Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements)
 
 ### Skill 1.3.3 — Formatting input data for FM inference
 > *Format input data for FM inference according to model-specific requirements (for example, by using JSON formatting for Amazon Bedrock API requests, structured data preparation for SageMaker AI endpoints, conversation formatting for dialog-based applications).*
@@ -307,6 +293,7 @@ S3 (raw) ──EventBridge──► Step Functions
 - `document.name` has restrictions (allowed characters only). An unsanitised user filename can trigger a `ValidationException`, and the name is also a **prompt-injection vector**, so use a neutral name.
 - **Response**: `output.message.content[]`, `stopReason` (`end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `guardrail_intervened`, `content_filtered`), `usage` (input/output tokens), `metrics.latencyMs`.
 - `stopReason = max_tokens` means the output was truncated. Raise `maxTokens` or ask for a shorter format.
+- ⚠️ Converse `ValidationException` causes: non-alternating roles, first message not `user`, unsupported document format/name, image too large, `maxTokens` above model max, or a `toolUse` without a matching `toolResult`.
 
 #### InvokeModel bodies (recognise the shapes)
 ```json
@@ -342,16 +329,7 @@ S3 (raw) ──EventBridge──► Step Functions
 ```
 - Some JumpStart/LMI containers also accept an **OpenAI-style Messages API** (`{"messages": [...]}`) and apply the model's **chat template** server-side. If you send raw `inputs`, **you must apply the model's chat template yourself** (e.g. Llama `<|begin_of_text|><|start_header_id|>user<|end_header_id|>...`, Mistral `[INST] ... [/INST]`). If the template is wrong, you get rambling or poor-quality output.
 - Custom models use **inference scripts** (`input_fn` / `predict_fn` / `output_fn`) to deserialise, validate, and serialise.
-- **Inference options and payload limits**:
-
-| Option | When | Payload / time |
-| --- | --- | --- |
-| **Real-time** | Low-latency interactive | Small payloads (**~6 MB**), **~60 s** response timeout |
-| **Serverless** | Spiky/intermittent, tolerate cold start | Small payloads, no GPUs |
-| **Asynchronous** | Large payloads, long processing, queue-based, scale to zero | Input in S3, **up to 1 GB**, up to **1 hour**, SNS notification |
-| **Batch Transform** | Offline bulk scoring of a dataset | S3 → S3, no persistent endpoint |
-| **Response streaming** | Token streaming for chat UX | `InvokeEndpointWithResponseStream` |
-*(Limits change, so verify in docs. Real-time limits in particular have been raised for some configurations.)*
+- **Payload limits decide the inference option**: **real-time** takes small payloads (**~6 MB**, **~60 s** response timeout); **asynchronous** takes the input from S3 (**up to 1 GB**, up to **1 hour**, SNS notification); **batch transform** is S3 → S3 offline; **serverless** is small payloads with no GPUs; token streaming uses `InvokeEndpointWithResponseStream`. *(Limits change, so verify in docs. Real-time limits in particular have been raised for some configurations.)* → Full detail: [Task 2.2 · Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements)
 - **Tabular input for classic ML endpoints**: same feature order and encoding as training (reuse the Data Wrangler/Processing transforms, or **SageMaker Feature Store** for consistent online/offline features).
 
 #### Conversation formatting for dialog applications
@@ -386,6 +364,19 @@ save_history(session_id, history)                 # DynamoDB with TTL
 - Cleaner, more consistent input leads to **better retrieval** (embeddings of noisy text cluster badly), **more consistent outputs**, **fewer tokens** (lower cost and latency), and **less hallucination** (the context is unambiguous).
 - Apply it at **two points**: **ingestion time** (documents for RAG / training data) and **request time** (user queries and inputs).
 
+#### Decision table — which enhancement tool?
+Pick by need; each tool is explained in the sections below.
+
+| Need | Pick |
+| --- | --- |
+| Deterministic cleanup: dates, units, Unicode, whitespace, dedup | **Lambda** (or Glue for batch scale) |
+| Standard entities, key phrases, language, sentiment, PII, at scale, cheap | **Amazon Comprehend** |
+| Domain-specific entities/classes with labelled data | **Comprehend custom entity recognition / custom classification** |
+| Clinical text | **Comprehend Medical** |
+| Messy → clean/structured, arbitrary schema, summarisation | **Amazon Bedrock FM** (small model, batch inference for bulk) |
+| Bulk language conversion | **Amazon Translate** |
+| Extract fields from multimodal docs with a schema | **Bedrock Data Automation blueprints** |
+
 #### Lambda normalisation (deterministic, cheap, fast)
 | Problem | Normalisation |
 | --- | --- |
@@ -408,8 +399,26 @@ save_history(session_id, history)                 # DynamoDB with TTL
   - **Language detection** lets you **route** to Translate or the right model/embedding.
   - **Intent/classification** **routes** the request to the right prompt template, KB, or agent.
   - **Entity grounding**: add extracted entities explicitly into the prompt ("Customer: ACME; Order: 12345").
-  - **PII redaction** before the FM, logs, or the vector store (compliance).
+  - 🎯 **PQ31** **PII redaction** before the FM, logs, the vector store or fine-tuning (compliance). Once PII is in a vector store it can be retrieved and shown to users, and PII in training data can be **memorised** by the model; both are very hard to remove. Use Comprehend `DetectPiiEntities` or Transcribe PII redaction, with Macie to discover PII in S3.
 - Comprehend vs FM: Comprehend is **cheaper, faster, deterministic, and scalable** for standard NLP tasks. An FM is more flexible (arbitrary schemas, reasoning) but costs more and its output varies.
+
+```python
+# Ingestion-time enhancement: Comprehend entities -> KB metadata sidecar (sketch)
+ents = comprehend.detect_entities(Text=text[:5000], LanguageCode="en")["Entities"]  # mind per-call size limits
+orgs = sorted({e["Text"] for e in ents if e["Type"] == "ORGANIZATION" and e["Score"] > 0.9})
+meta = {"metadataAttributes": {"organizations": orgs, "language": "en", "doc_type": "contract"}}
+s3.put_object(Bucket=B, Key=f"{key}.metadata.json", Body=json.dumps(meta))
+```
+
+> [!IMPORTANT]
+> **🎯 Practice question 31 — messy financial documents + PII to redact → consistent FM inputs, LEAST overhead**
+>
+> - **Amazon Textract** → analyses document **structure** (tables, forms, key-value pairs) and returns **structured, machine-readable text + metadata**, which fixes the formatting inconsistencies.
+> - **Amazon Comprehend PII detection and redaction** (built in, **no training**) → meets the PII policy before data reaches the FM.
+> - Use that **structured metadata in the prompt** → better reasoning and fewer hallucinations.
+> - ❌ **Macie:** *discovers and classifies* sensitive data in S3, but it's **not a document pre-processing or redaction step**.
+> - ❌ **Comprehend *custom* entity recognition:** you have to train and maintain models, when built-in PII detection already covers it.
+> - ❌ **Guardrails PII at inference:** filters during or after the call and **doesn't clean the input data**, which is the real cause.
 
 > [!IMPORTANT]
 > **🎯 Practice question 68 — summarise medical records: remove PHI, keep the medical terms, compare FMs, finish in 3 weeks**
@@ -442,14 +451,6 @@ save_history(session_id, history)                 # DynamoDB with TTL
 - Run it at **ingestion via batch inference** (cheaper, offline) instead of on every request where possible.
 - Risks: the FM can **alter facts or hallucinate** during rewriting. Use low temperature, instruct it to "preserve all facts and numbers", validate the output schema with Lambda, and spot-check with evaluation.
 
-```python
-# Ingestion-time enhancement: Comprehend entities -> KB metadata sidecar (sketch)
-ents = comprehend.detect_entities(Text=text[:5000], LanguageCode="en")["Entities"]  # mind per-call size limits
-orgs = sorted({e["Text"] for e in ents if e["Type"] == "ORGANIZATION" and e["Score"] > 0.9})
-meta = {"metadataAttributes": {"organizations": orgs, "language": "en", "doc_type": "contract"}}
-s3.put_object(Bucket=B, Key=f"{key}.metadata.json", Body=json.dumps(meta))
-```
-
 #### Request-time input enhancement pipeline
 ```text
 User input ─► Lambda: normalise + length/token check
@@ -458,26 +459,6 @@ User input ─► Lambda: normalise + length/token check
            ─► Guardrails (ApplyGuardrail / inline): prompt-attack + denied topics
            ─► Route to prompt template / KB / agent ─► FM
 ```
-
-#### Decision table — which enhancement tool?
-| Need | Pick |
-| --- | --- |
-| Deterministic cleanup: dates, units, Unicode, whitespace, dedup | **Lambda** (or Glue for batch scale) |
-| Standard entities, key phrases, language, sentiment, PII, at scale, cheap | **Amazon Comprehend** |
-| Domain-specific entities/classes with labelled data | **Comprehend custom entity recognition / custom classification** |
-| Clinical text | **Comprehend Medical** |
-| Messy → clean/structured, arbitrary schema, summarisation | **Amazon Bedrock FM** (small model, batch inference for bulk) |
-| Bulk language conversion | **Amazon Translate** |
-| Extract fields from multimodal docs with a schema | **Bedrock Data Automation blueprints** |
-
-### Common gotchas
-- Validating **after** embedding means you must re-embed and re-sync to fix issues. Validate upstream.
-- Forgetting to **re-sync the KB** after changing documents or metadata sidecars leaves the KB serving stale data.
-- Converse `ValidationException` causes: non-alternating roles, first message not `user`, unsupported document format/name, image too large, `maxTokens` above model max, or a `toolUse` without a matching `toolResult`.
-- Sending raw prompts to an open-source SageMaker LLM **without its chat template** gives poor-quality output.
-- Embedding with a model that **doesn't support the document language** gives poor retrieval. Check language support or translate.
-- Lambda timeouts on large PDFs or long audio: use async Textract/Transcribe jobs + Step Functions waits (`.sync` / callback) instead of polling inside Lambda.
-- PII in fine-tuning data can be **memorised** by the model. Redact it before training.
 
 ## Exam triggers
 
