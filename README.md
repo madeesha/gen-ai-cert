@@ -23,7 +23,7 @@ Parts of the notes tested by a practice question set (PQ1–PQ75) are marked lik
   - 🟣 `[!IMPORTANT]`: the notes already covered this content.
   - 🟠 `[!WARNING]`: this content was missing and has been added (PQ4 AgentCore limits, PQ5 cross-account access, PQ9 text-to-SQL validation, PQ13 video pipeline, PQ14 OpenSearch Serverless permissions, PQ17 Application Insights, PQ20 user-scoped agent access, PQ22 boundary vs SCP split, PQ24 Transcribe streaming, PQ29 Step Functions vs Flows, PQ32 streaming APIs, PQ38 webhook auth, PQ52 SageMaker Neo, PQ53 Lake Formation cross-account, PQ67 image invocation logging, PQ72 SCP vs boundary conflict).
 
-Run `grep -rn "🎯" gen-ai-cert/` to list all highlights.
+Run `grep -rn "🎯" .` from the repo root to list all highlights.
 
 | PQ | Topic | Where |
 | --- | --- | --- |
