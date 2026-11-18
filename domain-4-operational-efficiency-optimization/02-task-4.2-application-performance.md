@@ -12,18 +12,16 @@
 > - **Skill 4.2.6:** System-level performance for GenAI workflows
 
 ## Key points
-- **Latency has 3 parts:** **TTFT** (time to first token: queueing, network, prompt processing), **output speed** (tokens/sec while decoding) and **end-to-end** (TTFT + output tokens ÷ speed). Fix TTFT with **shorter/cached prompts, smaller models, proximity**. Fix total time with **fewer output tokens** (`maxTokens`, concise-format instructions). Fix *perceived* latency with **streaming**.
-- **Latency-optimised inference** is a **preview** feature, set per request with `performanceConfig: {"latency": "optimized"}`. It supports **Nova Pro, Claude 3.5 Haiku, Llama 3.1 70B / 405B** through **cross-Region inference profiles** in US Regions. Once its quota runs out, requests are **served and billed at standard**. The default is `standard`.
-- **Predictable queries** (FAQs, daily summaries, product descriptions) → **pre-compute** them offline with **batch inference**, store the results (DynamoDB/S3/CloudFront) and serve them in milliseconds with no FM call.
-- **Independent sub-tasks** → **fan out in parallel**: Step Functions **Parallel** (fixed branches) or **Map** (dynamic list), or `asyncio`/thread pools in code. Latency becomes the **slowest branch**, not the sum.
-- **Benchmark on percentiles (P50/P90/P99)**, not averages. Measure TTFT and end-to-end separately, under realistic prompt/completion lengths and concurrency.
-- **Retrieval speed:** tune **HNSW** (`m`, `ef_construction` at build time; `ef_search` at query time trades recall for latency). Use **quantisation** (fp16/byte/binary, or disk mode) to fit more vectors in RAM. Use **efficient filtering** (inside the k-NN query), not `post_filter`.
-- **Retrieval relevance:** **query preprocessing** (rewrite, expand, decompose), **hybrid search** (BM25 + vector with a **normalisation processor** and custom **weights**), then **rerank** a larger top-N down to the few chunks the FM needs.
-- **Throughput limits are tokens and requests per minute (TPM/RPM) per model per Region.** To raise them: **CRIS** (more capacity across Regions), **quota increases**, **Provisioned Throughput / Reserved tier**, and **batch inference** for anything that isn't interactive. Protect quotas with **SQS buffering + concurrency limits + backoff**.
-- **Parameters by use case:** extraction, classification and code → **low temperature (0–0.3)**, tight `maxTokens`, **stop sequences**. Creative work → higher temperature/topP. Usually tune **temperature *or* topP, not both**. `topK` isn't in Converse `inferenceConfig`, so pass it in **`additionalModelRequestFields`**.
-- **Prove a parameter or prompt change with an A/B test** (Prompt Management versions/variants or traffic splitting with AppConfig) on quality, latency and cost, not on a gut feeling.
-- **Capacity planning works in tokens:** peak RPM × (avg input + avg output tokens) = TPM. Size **PT model units** and SageMaker instances from it, and **watch the prompt vs completion mix** because output tokens dominate latency.
-- **SageMaker autoscaling for LLMs** → scale on **concurrency** (`SageMakerVariantConcurrentRequestsPerModelHighResolution` / `…InferenceComponentConcurrentRequestsPerCopyHighResolution`), not on invocations alone. Add **scheduled scaling** for daily traffic peaks.
+- **Latency = TTFT + output tokens ÷ output speed.** Input size drives TTFT, output length drives the rest, and streaming only fixes *perceived* latency. Find which part dominates before choosing a fix (4.2.1).
+- **Latency vs cost → choose by how predictable and how urgent the request is:** predictable → pre-compute · urgent with the same model → latency-optimised inference · cost-sensitive → smaller model or cascade · independent parts → parallel calls · nobody waiting → batch (4.2.1).
+- **Benchmark on percentiles (P50/P90/P99)** with realistic prompt and output lengths, never on averages (4.2.1).
+- **Retrieval speed vs recall is mostly an index-tuning problem:** HNSW `ef_search` is the runtime dial, memory is the scaling limit, and quantisation buys headroom. This file is the home for OpenSearch k-NN tuning (4.2.2).
+- **Retrieval relevance:** preprocess the query, use hybrid search for exact terms, then rerank wide → narrow so the FM gets fewer, better chunks (4.2.2; concepts in 1.5.4).
+- **Throughput is capped in tokens (TPM) as well as requests (RPM)**, per model per Region. Protect the quota (SQS, bounded concurrency, backoff), then raise the ceiling (CRIS → quota increase → PT/Reserved), and move bulk work to batch (4.2.3).
+- **Parameters by use case:** deterministic tasks → low temperature and tight `maxTokens`; creative tasks → higher temperature/topP. `top_k` goes in `additionalModelRequestFields` (4.2.4).
+- **Prove every change with an A/B test** on quality, latency and cost (4.2.4).
+- **Plan capacity in tokens**, and autoscale self-hosted LLMs on **concurrency**, not invocations, with scheduled scaling ahead of known peaks (4.2.5).
+- **System-level wins usually come from fewer hops:** trace every hop, cut round trips, reuse connections, go async for long jobs (4.2.6).
 
 ## Notes
 
@@ -53,13 +51,15 @@
 | Interactive but cost-sensitive | Smaller model (e.g. Haiku/Nova Lite/Micro class) + **cascade** to a bigger model only on low confidence | Low |
 | Complex multi-part task | **Parallel** sub-calls, then an aggregation call | Same tokens, much lower wall-clock time |
 | Non-interactive (reports, enrichment, evals) | **Batch inference** (async, discounted, verify in docs for the current discount) | Lowest |
-| Repeated long system prompt / documents | **Prompt caching** (see [Task 4.1](01-task-4.1-cost-optimization-resource-efficiency.md)) | Lower cost *and* lower TTFT |
+| Repeated long system prompt / documents | **Prompt caching** (see [Task 4.1 · Skill 4.1.4](01-task-4.1-cost-optimization-resource-efficiency.md#skill-414--intelligent-caching-systems)) | Lower cost *and* lower TTFT |
+
+The sections below take each pattern in turn: pre-computation, latency-optimised inference, parallel requests and streaming, then how to benchmark the result.
 
 #### Pre-computation for predictable queries
 - **Find the predictable workload:** top-N FAQ intents, product descriptions, nightly summaries of tickets or news, "explain this dashboard" for fixed reports, personalised content that can be generated ahead of time.
 - **Pipeline:** EventBridge Scheduler → Step Functions → **Bedrock batch inference** (`CreateModelInvocationJob`, JSONL in S3) → results to S3 → load into DynamoDB/OpenSearch → serve through API Gateway/CloudFront.
 - **Freshness:** regenerate when the source data changes (S3 events / DynamoDB Streams → EventBridge) or on a TTL.
-- **Combine with a semantic cache** so near-duplicate user questions hit pre-computed answers (caching mechanics are covered in [Task 4.1](01-task-4.1-cost-optimization-resource-efficiency.md)).
+- **Combine with a semantic cache** so near-duplicate user questions hit pre-computed answers (caching mechanics are covered in [Task 4.1 · Skill 4.1.4](01-task-4.1-cost-optimization-resource-efficiency.md#skill-414--intelligent-caching-systems)).
 - ⚠️ **Gotcha:** pre-computed answers can go stale or ignore user context. Only pre-compute content that is **not user-specific or is safely parameterisable**.
 
 #### Latency-optimised inference in Amazon Bedrock
@@ -88,7 +88,7 @@
 - 🎯 **Exam cue:** "time-sensitive customer-facing app, keep the same model and accuracy, faster responses, no re-architecture" → **latency-optimised inference**. "Reduce latency by moving off a large model" → **smaller model / distillation** (different trade-off: accuracy may drop).
 
 #### Parallel requests for complex workflows
-- **When:** a task breaks into **independent** sub-tasks: summarise 10 documents, extract several field groups, call several specialist models, run guardrail checks alongside generation.
+- **When:** a task breaks into **independent** sub-tasks: summarise 10 documents, extract several field groups, call several specialist models, run guardrail checks alongside generation. Latency becomes the **slowest branch**, not the sum of all branches.
 - **Step Functions:**
   - **Parallel state** → fixed set of branches (e.g. sentiment + entities + summary of the same text).
   - **Map state** → dynamic array (one branch per document/chunk). Use `MaxConcurrency` to stay under Bedrock RPM/TPM. **Distributed Map** handles very large fan-outs from S3 (thousands of items).
@@ -119,12 +119,12 @@ async def fan_out(chunks):
 ```
 
 - **Map-reduce summarisation** = parallel "map" summaries + one "reduce" call. This beats one huge prompt on latency and on context-window limits.
-- ⚠️ Parallelism **multiplies concurrent RPM/TPM demand**, so throttling rises. Bound concurrency and add backoff with jitter (mechanics in [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md)).
+- ⚠️ Parallelism **multiplies concurrent RPM/TPM demand**, so throttling rises. Bound concurrency and add backoff with jitter (mechanics in [Task 2.4 · Skill 2.4.3](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems)).
 
 #### Response streaming
-- `ConverseStream` / `InvokeModelWithResponseStream` → deliver tokens as they arrive. The front end receives them over **WebSocket API**, **Lambda response streaming** or **API Gateway REST response streaming**. Mechanics and limits are in [Task 2.4 · Skill 2.4.2](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md).
-- **Guardrails + streaming:** **synchronous** mode buffers and scans chunks before release (safer, adds latency). **Asynchronous** mode streams immediately and scans in the background (lower latency, but some unsafe text may be shown before it is caught).
+The performance angle only. APIs (`ConverseStream`, `InvokeModelWithResponseStream`), front-end transports (WebSocket API, Lambda response streaming, API Gateway REST response streaming) and their limits → [Task 2.4 · Skill 2.4.2](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md#skill-242--real-time-ai-interaction-systems--pq24).
 - Streaming does **not** reduce cost or total generation time. It improves **perceived** responsiveness and lets users cancel early, which does save output tokens if you stop the stream.
+- **Guardrails + streaming latency:** **synchronous** mode buffers and scans chunks before release (safer, adds latency). **Asynchronous** mode streams immediately and scans in the background (lower latency, but some unsafe text may be shown before it is caught). Configuration → [Task 3.1 · Skill 3.1.2](../domain-3-ai-safety-security-governance/01-task-3.1-input-output-safety-controls.md#skill-312--content-safety-frameworks-for-harmful-outputs).
 
 #### Performance benchmarking
 - **Metrics to capture:** TTFT, output tokens/sec, end-to-end latency, error/throttle rate, cost per request, and quality score (from evaluation, see Domain 5).
@@ -139,7 +139,7 @@ async def fan_out(chunks):
 
 > *Enhance retrieval performance to improve the relevance and speed of retrieved information for FM context augmentation (for example, by using index optimization, query preprocessing, hybrid search implementation with custom scoring).*
 
-Basics (chunking, embeddings, hybrid and rerank concepts) are covered in [Task 1.5](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md), and store architecture and sharding in [Task 1.4](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md). This section is about **tuning**.
+Basics (chunking, embeddings, hybrid and rerank concepts) are covered in [Task 1.5](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md), and store architecture and sharding in [Task 1.4 · Skill 1.4.3](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md#skill-143--high-performance-vector-database-architectures-at-scale). This section is about **tuning**: first the index itself (speed and memory), then filtering, then the relevance levers that sit around the search (query preprocessing, hybrid scoring, reranking).
 
 #### Index optimisation (OpenSearch k-NN)
 
@@ -201,52 +201,24 @@ GET kb-index/_search
 }
 ```
 
-- **Bedrock Knowledge Bases:** metadata **filters** in `retrievalConfiguration.vectorSearchConfiguration.filter` (equals, in, greaterThan, startsWith, andAll/orAll, …; operator support varies by vector store, so verify in docs). **Implicit filtering** lets an FM derive filters from the user query.
+- **Bedrock Knowledge Bases:** metadata **filters** go in `retrievalConfiguration.vectorSearchConfiguration.filter`, and **implicit filtering** lets an FM derive filters from the user query. Operators and design → [Task 1.4 · Skill 1.4.2](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md#skill-142--metadata-frameworks-for-search-precision-and-context-awareness--pq40).
 
 #### Query preprocessing
-- **Normalise:** strip boilerplate and greetings, fix casing and spelling, expand acronyms with a domain dictionary.
-- **Rewrite for retrieval:** turn a conversational follow-up ("what about the EU one?") into a **standalone query** using the conversation history. This is critical for multi-turn RAG.
-- **Expand:** synonyms or multiple paraphrases (multi-query), run in parallel and merge the results.
-- **Decompose:** split multi-part questions into sub-queries. Bedrock KB **`orchestrationConfiguration.queryTransformationConfiguration` with `QUERY_DECOMPOSITION`** in `RetrieveAndGenerate`.
-- **HyDE:** generate a hypothetical answer and embed that. It helps when queries are short and documents are long.
-- **Route:** classify the query and send it to the right index or knowledge base (product vs policy vs code) instead of searching everything.
+The techniques (normalise, standalone rewrite for multi-turn chat, multi-query expansion, decomposition with KB `QUERY_DECOMPOSITION`, HyDE, routing to the right index or KB) are explained in [Task 1.5 · Skill 1.5.5](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md#skill-155--query-handling-systems-expansion-decomposition-transformation). The performance angle:
+- **Rewriting a follow-up into a standalone query** is the fix for multi-turn RAG retrieving the wrong chunks.
+- **Routing** to one index or KB is also a speed win, because you search less.
+- Expansions can run **in parallel**, and their results are then merged.
 - ⚠️ Each preprocessing FM call **adds latency and cost**. Use a **small fast model** for rewriting, cache the rewrites, and skip rewriting for queries that are already well-formed.
 
 #### Hybrid search with custom scoring 🎯 PQ7
-- **Why:** vectors capture meaning, while BM25 catches **exact terms** (product codes, error IDs, names, acronyms) that embeddings blur. Hybrid improves recall *and* precision.
-- **Bedrock KB:** `"overrideSearchType": "HYBRID"` (or `SEMANTIC`) in `vectorSearchConfiguration`. It needs a vector store that supports it, such as OpenSearch Serverless/managed with a text field (verify in docs for others).
-- **OpenSearch native:** a `hybrid` query plus a **search pipeline** with the **normalization processor**, because BM25 and vector scores are on different scales:
-
-```json
-PUT _search/pipeline/hybrid-pipeline
-{
-  "phase_results_processors": [{
-    "normalization-processor": {
-      "normalization": { "technique": "min_max" },
-      "combination": {
-        "technique": "arithmetic_mean",
-        "parameters": { "weights": [0.3, 0.7] }
-      }
-    }
-  }]
-}
-
-GET kb-index/_search?search_pipeline=hybrid-pipeline
-{
-  "size": 10,
-  "query": { "hybrid": { "queries": [
-    { "match": { "text": "error E-4012 payment gateway timeout" } },
-    { "knn":   { "embedding": { "vector": [ "..." ], "k": 50 } } }
-  ]}}
-}
-```
-
-- **Normalisation:** `min_max` or `l2`. **Combination:** `arithmetic_mean`, `geometric_mean`, `harmonic_mean`, with **weights** in the same order as the sub-queries. **Reciprocal rank fusion (RRF)** is an alternative that combines ranks instead of scores (OpenSearch 2.19+ via the score-ranker processor; verify in docs).
+Why hybrid (BM25 catches exact terms such as product codes, error IDs and acronyms that embeddings blur), the KB `"overrideSearchType": "HYBRID"` setting and a full search-pipeline example are in [Task 1.5 · Skill 1.5.4](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md#skill-154--advanced-search-architectures-semantic-hybrid-reranking). Tuning it:
+- **Score fusion options:** the search pipeline's **normalization processor** normalises with `min_max` or `l2` and combines with `arithmetic_mean`, `geometric_mean` or `harmonic_mean`. **Weights** are listed in the same order as the sub-queries. **Reciprocal rank fusion (RRF)** combines ranks instead of scores (OpenSearch 2.19+ via the score-ranker processor; verify in docs).
 - **Tuning the weights:** lean towards **lexical** for ID- and terminology-heavy corpora (support tickets, part numbers) and towards **semantic** for natural-language questions. Tune on a **labelled query set** (recall@k, MRR, nDCG), not by eye.
 - **Custom scoring signals:** boost by recency (`function_score` decay on date), source authority or popularity, and **metadata boosts** (same product line as the user).
 
 #### Reranking for relevance *and* speed 🎯 PQ8
-- **Retrieve wide, rerank narrow:** retrieve top 20–50 cheaply, rerank with a cross-encoder (**Amazon Rerank**, **Cohere Rerank** via Bedrock, KB `rerankingConfiguration`, or the standalone `Rerank` API), then pass the **top 3–5** to the FM.
+Reranker models and APIs (Amazon Rerank, Cohere Rerank, KB `rerankingConfiguration`, the standalone `Rerank` API) → [Task 1.5 · Skill 1.5.4](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md#skill-154--advanced-search-architectures-semantic-hybrid-reranking).
+- **Retrieve wide, rerank narrow:** retrieve the top 20–50 cheaply, rerank with a cross-encoder, then pass the **top 3–5** to the FM.
 - Net effect: **better relevance** and **fewer context tokens**, so lower FM latency and cost. This usually outweighs the added rerank latency.
 - Don't rerank when the first-stage retrieval is already precise or latency budgets are extremely tight. Measure both ways.
 
@@ -262,27 +234,28 @@ GET kb-index/_search?search_pipeline=hybrid-pipeline
 - **Quota burndown:** Bedrock reserves tokens at request start (input + `maxTokens`) and adjusts afterwards. Some newer models count output tokens at a multiplier. **An oversized `maxTokens` wastes quota even if the model writes less.** (Verify in docs for the current burndown rules per model.)
 
 #### Token processing optimisation
-- **Trim input:** remove redundant instructions, send fewer and smaller RAG chunks (rerank → top-k), summarise long conversation history (rolling summary) instead of resending everything.
-- **Cache static prefixes:** with **prompt caching**, cached tokens are processed faster and cheaper (details in [Task 4.1](01-task-4.1-cost-optimization-resource-efficiency.md)).
-- **Bound output:** a realistic `maxTokens`, stop sequences, "answer in ≤3 bullets", and structured output (JSON fields instead of prose).
+Every token saved for cost ([Task 4.1 · Skill 4.1.1](01-task-4.1-cost-optimization-resource-efficiency.md#skill-411--token-efficiency-systems)) also frees quota. The throughput-specific points:
+- **Trim input** (fewer, reranked chunks, rolling history summaries) and **bound output** (a realistic `maxTokens`, stop sequences, structured output). Because of quota burndown, a tight `maxTokens` matters for throughput even when answers are short.
+- **Cache static prefixes:** with **prompt caching**, cached tokens are processed faster and cheaper (details in [Skill 4.1.4](01-task-4.1-cost-optimization-resource-efficiency.md#skill-414--intelligent-caching-systems)).
 - **Batch small items:** classify 20 short reviews in **one** request (JSON array in, JSON array out) instead of 20 requests. This cuts RPM and repeated system-prompt tokens. ⚠️ Too many items per request hurts accuracy and makes partial failures harder to handle.
 - **Count before sending:** the **CountTokens** API (model support: verify in docs) or tokenizer estimates. Route oversized prompts to summarisation or a bigger-context model.
 
 #### Batch inference strategies
-- **Bedrock batch inference** (`CreateModelInvocationJob`): JSONL records in S3 → async job → JSONL outputs in S3. **Discounted vs on-demand** (verify in docs for the current discount) and **doesn't consume your on-demand interactive quota in the same way** (separate batch quotas, verify in docs). There is a minimum records-per-job quota (verify in docs).
+- **Bedrock batch inference** (`CreateModelInvocationJob`, JSONL in and out of S3) is discounted (cost view in [Skill 4.1.3](01-task-4.1-cost-optimization-resource-efficiency.md#skill-413--high-performance-fm-systems-utilisation-and-throughput)). The throughput point is that it **doesn't consume your on-demand interactive quota in the same way** (separate batch quotas, verify in docs). There is a minimum records-per-job quota (verify in docs).
 - **Use for:** nightly enrichment, back-filling embeddings/summaries, evaluation runs, pre-computation (4.2.1), large classification jobs.
 - **Not for:** anything with a user waiting. Results arrive in **minutes to hours**.
 - **Embeddings at scale:** batch inference for Titan/Cohere embeddings, or Lambda/Glue jobs with bounded concurrency. Embedding models also have their own TPM/RPM quotas.
-- **SageMaker:** **Batch Transform** for offline jobs on your own models. **Async Inference** for large payloads or long jobs with queueing and scale-to-zero (see [Task 2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md)).
+- **SageMaker:** **Batch Transform** for offline jobs on your own models. **Async Inference** for large payloads or long jobs with queueing and scale-to-zero (see [Task 2.2 · Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements)).
 
 #### Concurrent model invocation management
 - **Buffer with SQS:** producers enqueue requests, and a consumer fleet (Lambda with **maximum concurrency on the SQS event source**, or ECS workers) calls Bedrock at a controlled rate. Spikes are absorbed and requests are not dropped.
 - **Bound concurrency** in code (semaphores), Step Functions `MaxConcurrency`, Lambda **reserved concurrency** → stay under TPM/RPM.
 - **Per-tenant fairness:** separate queues or token buckets per tenant (DynamoDB counters, API Gateway **usage plans**) so one tenant can't use up the shared model quota.
-- **Backoff + jitter** on `ThrottlingException` (SDK `adaptive` retry mode does client-side rate limiting). Details in [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md).
-- **Priority lanes:** interactive traffic → on-demand / Priority tier. Background traffic → batch or Flex tier (service tiers in [Task 2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md)).
+- **Backoff + jitter** on `ThrottlingException` (SDK `adaptive` retry mode does client-side rate limiting). Details in [Task 2.4 · Skill 2.4.3](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems).
+- **Priority lanes:** interactive traffic → on-demand / Priority tier. Background traffic → batch or Flex tier (service tiers in [Task 2.2 · Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements)).
 
 #### Raising the ceiling
+When protecting the quota isn't enough, raise it. Try the no-commitment options first. When a commitment pays off is covered in [Skill 4.1.3](01-task-4.1-cost-optimization-resource-efficiency.md#skill-413--high-performance-fm-systems-utilisation-and-throughput).
 
 | Option | What it gives | When |
 | --- | --- | --- |
@@ -345,6 +318,10 @@ print(resp["stopReason"])   # end_turn | max_tokens | stop_sequence | tool_use |
 | **Creative writing / brainstorming / marketing variants** | 0.7 – 1.0 | topP 0.9–0.95, higher top K | Larger | More diversity. Generate several candidates |
 | **Synthetic data generation** | 0.8 – 1.0 | High | Per record | Diversity matters. Validate the outputs |
 
+- **Rule of thumb:** change **temperature *or* topP**, not both at once. Both control randomness, and tuning both makes results hard to attribute.
+- **Temperature 0 is not a guarantee of determinism** across calls or model versions. For strict repeatability, use deterministic code, caching or templates (for example, text-to-SQL then execute, instead of letting the FM compute numbers).
+- **Reasoning models / extended thinking:** a bigger thinking budget gives better quality on hard problems but **higher latency and output-token cost**. Some models restrict temperature/top_p when thinking is enabled (verify in docs per model).
+
 > [!IMPORTANT]
 > **🎯 Practice question 10 — inaccurate answers, 200 ms–3 s latency swings, identical queries → different outputs**
 >
@@ -357,10 +334,6 @@ print(resp["stopReason"])   # end_turn | max_tokens | stop_sequence | tool_use |
 > - ❌ **More memory or provisioned concurrency:** Bedrock is fully managed, so there's no compute to tune.
 > - ❌ **Custom model + quantisation on SageMaker:** a lot of work, and it doesn't fix consistency or accuracy.
 > - ❌ **EKS microservices + Kafka:** improves scale and decoupling, not output quality.
-
-- **Rule of thumb:** change **temperature *or* topP**, not both at once. Both control randomness, and tuning both makes results hard to attribute.
-- **Temperature 0 is not a guarantee of determinism** across calls or model versions. For strict repeatability, use deterministic code, caching or templates (for example, text-to-SQL then execute, instead of letting the FM compute numbers).
-- **Reasoning models / extended thinking:** a bigger thinking budget gives better quality on hard problems but **higher latency and output-token cost**. Some models restrict temperature/top_p when thinking is enabled (verify in docs per model).
 
 #### A/B testing improvements
 - **What to test:** model, model version, prompt version, temperature/topP, `maxTokens`, retrieval settings (k, hybrid weights, reranker on/off).
@@ -379,9 +352,11 @@ print(resp["stopReason"])   # end_turn | max_tokens | stop_sequence | tool_use |
 
 > *Create efficient resource allocation systems specifically for FM workloads (for example, by using capacity planning for token processing requirements, utilization monitoring for prompt and completion patterns, auto-scaling configurations that are optimized for GenAI traffic patterns).*
 
+This skill is the Domain 4 home for capacity planning and for autoscaling self-hosted models on GenAI traffic. The cost side of the same decisions (purchase options, PT right-sizing) is in [Skill 4.1.3](01-task-4.1-cost-optimization-resource-efficiency.md#skill-413--high-performance-fm-systems-utilisation-and-throughput). LLM serving internals (model loading, Fast Model Loader) are in [Task 2.2 · Skill 2.2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-222--address-the-llm-specific-challenges-of-deployment).
+
 #### Capacity planning in tokens
-1. **Measure the workload:** peak RPM, **average and P95 input tokens**, **average and P95 output tokens**, and the concurrency profile (hour of day, day of week, launches).
-2. **Convert to tokens/min:** `TPM_peak ≈ RPM_peak × (avg_input + avg_output)`. Plan on P95 lengths, with headroom of 20–30%.
+1. **Measure the workload:** peak RPM, **average and P95 input tokens**, **average and P95 output tokens**, and the concurrency profile (hour of day, day of week, launches). Plan for **output tokens** separately, because they drive both latency and cost.
+2. **Convert to tokens/min:** `TPM_peak ≈ RPM_peak × (avg_input + avg_output)` (or `peak RPS × 60 × (avg input + avg output)`). Plan on P95 lengths, with headroom of 20–30%, and compare the result with the account **TPM/RPM quotas** for that model and Region in Service Quotas.
 3. **Account for quota burndown:** reserved `maxTokens` and output multipliers may make *quota* TPM higher than the TPM actually used (verify in docs).
 4. **Pick the capacity model:**
    - on-demand within quota (+ CRIS)
@@ -389,21 +364,22 @@ print(resp["stopReason"])   # end_turn | max_tokens | stop_sequence | tool_use |
    - **Provisioned Throughput** (model units sized from the TPM target; tokens per MU vary by model, so verify in docs or ask AWS)
    - Reserved tier
    - SageMaker instances (from load tests: tokens/sec per instance at the target latency)
-5. **Re-plan on change:** a new prompt version that adds 2,000 tokens of context can **double** TPM overnight.
+   - and in every case, flatten peaks with **queues (SQS) and backoff**
+5. **Check the other limits too:** **max concurrency** for agents, KB queries and Lambda.
+6. **Re-plan on change:** a new prompt version that adds 2,000 tokens of context can **double** TPM overnight.
 
 #### Monitoring prompt vs completion patterns
-- **CloudWatch Bedrock metrics** per `ModelId`: `Invocations`, `InputTokenCount`, `OutputTokenCount`, `InvocationLatency`, `InvocationThrottles`, `InvocationClientErrors`/`InvocationServerErrors`. Build **input:output ratio** and **tokens per request** with metric math.
-- **Model invocation logs** (CloudWatch Logs / S3) → Logs Insights by application, user or prompt version. Use **application inference profiles** with tags to attribute usage per team or app.
+- **Sources:** CloudWatch `AWS/Bedrock` metrics per `ModelId` (full list in [Task 4.3 · Skill 4.3.2](03-task-4.3-monitoring-observability.md#skill-432--comprehensive-genai-monitoring-and-kpis)). Build the **input:output ratio** and **tokens per request** with metric math. **Model invocation logs** → Logs Insights by application, user or prompt version. **Application inference profiles** with tags attribute usage per team or app.
 - **What the patterns tell you:**
   - High input, low output → RAG/context-heavy → **prompt caching**, fewer chunks, rerank
   - Low input, high output → generation-heavy → cap output, smaller model, latency-optimised inference
   - Rising tokens per request over time → prompt bloat or conversation history growth → summarise history
-- **PT utilisation:** if Provisioned Throughput sits under-used, downsize at commitment end or move bursty traffic back to on-demand. If it saturates, add MUs or overflow to on-demand/CRIS.
+- **PT utilisation:** under-used or saturated Provisioned Throughput → right-size it as in [Skill 4.1.3](01-task-4.1-cost-optimization-resource-efficiency.md#skill-413--high-performance-fm-systems-utilisation-and-throughput).
 
 #### Autoscaling for GenAI traffic (SageMaker)
 - **Why invocations-per-instance is weak for LLMs:** one request may take 0.5 s or 30 s depending on output length, so **concurrency** reflects load better.
 - **Predefined target-tracking metrics:**
-  - Endpoint variants: `SageMakerVariantInvocationsPerInstance`, **`SageMakerVariantConcurrentRequestsPerModelHighResolution`**
+  - Endpoint variants: `SageMakerVariantInvocationsPerInstance` (the classic metric), **`SageMakerVariantConcurrentRequestsPerModelHighResolution`**
   - Inference components: `SageMakerInferenceComponentInvocationsPerCopy`, **`SageMakerInferenceComponentConcurrentRequestsPerCopyHighResolution`**
   - The **high-resolution concurrency** metrics enable **faster scale-out** on bursts.
 - **GPU utilisation / GPU memory** → **custom CloudWatch metrics** with target tracking or step scaling (not predefined).
@@ -411,25 +387,25 @@ print(resp["stopReason"])   # end_turn | max_tokens | stop_sequence | tool_use |
   - **target tracking** (default choice)
   - **step scaling** (aggressive reaction to big spikes)
   - **scheduled scaling** (diurnal or business-hours traffic: pre-warm before 9 am, scale in at night)
-- **Cooldowns** (default 300 s for target tracking) and `DisableScaleIn` for scale-out-only policies.
-- **LLM cold starts are slow** (pulling a large container + loading weights), so scale out **before** demand: scheduled scaling, higher minimum capacity, keeping one warm copy. Use faster loading features to shorten scale-out (see [Task 2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md)).
-- **Inference components:** pack multiple models/copies per instance, scale **copies** independently, and **scale to zero copies** for idle models (verify in docs for current support).
+- **Inference components:** pack multiple models/copies per instance, scale **copies** independently (instances scale under them), and **scale to zero copies** for idle models (verify in docs for current support).
 - **Serverless/async options** for spiky or idle-heavy traffic: SageMaker **Serverless** (CPU only, small models) or **Async** (scale to zero, queue-backed). Bedrock on-demand is the "no capacity management" default.
 
-```bash
-aws application-autoscaling put-scaling-policy \
-  --service-namespace sagemaker \
-  --resource-id endpoint/llm-endpoint/variant/AllTraffic \
-  --scalable-dimension sagemaker:variant:DesiredInstanceCount \
-  --policy-name concurrency-tt --policy-type TargetTrackingScaling \
-  --target-tracking-scaling-policy-configuration '{
-    "TargetValue": 4,
-    "PredefinedMetricSpecification": {
-      "PredefinedMetricType": "SageMakerVariantConcurrentRequestsPerModelHighResolution"
-    },
-    "ScaleInCooldown": 600, "ScaleOutCooldown": 60
-  }'
+```python
+aas = boto3.client("application-autoscaling")
+aas.register_scalable_target(ServiceNamespace="sagemaker",
+    ResourceId="endpoint/llm-ep/variant/AllTraffic",
+    ScalableDimension="sagemaker:variant:DesiredInstanceCount", MinCapacity=1, MaxCapacity=8)
+aas.put_scaling_policy(PolicyName="llm-tt", ServiceNamespace="sagemaker",
+    ResourceId="endpoint/llm-ep/variant/AllTraffic",
+    ScalableDimension="sagemaker:variant:DesiredInstanceCount", PolicyType="TargetTrackingScaling",
+    TargetTrackingScalingPolicyConfiguration={
+        "TargetValue": 4.0,   # concurrent requests per instance
+        "PredefinedMetricSpecification": {"PredefinedMetricType": "SageMakerVariantConcurrentRequestsPerModelHighResolution"},  # verify metric name in docs
+        "ScaleInCooldown": 600, "ScaleOutCooldown": 60})
 ```
+
+- **LLM cold starts are slow** (pulling a large container + loading weights takes minutes), so scale out **before** demand: scheduled scaling, a lower target value, higher minimum capacity, keeping one warm copy. Use faster loading features (Fast Model Loader, cached containers) to shorten scale-out.
+- **Cooldowns and scale-in protection:** scale out fast and scale in slowly (as in the example: 60 s out, 600 s in; the target-tracking default is 300 s). Use `DisableScaleIn` for scale-out-only policies.
 
 ---
 
@@ -467,19 +443,19 @@ aws application-autoscaling put-scaling-policy \
 | Technique | Mechanism | Notes |
 | --- | --- | --- |
 | **Shorter prompts** | Less prefill → lower TTFT | Remove redundancy; compress RAG context |
-| **Prompt caching** | Reuse the processed prefix → lower TTFT and cost | Static content first, dynamic last; see [Task 4.1](01-task-4.1-cost-optimization-resource-efficiency.md) |
+| **Prompt caching** | Reuse the processed prefix → lower TTFT and cost | Static content first, dynamic last; see [Task 4.1 · Skill 4.1.4](01-task-4.1-cost-optimization-resource-efficiency.md#skill-414--intelligent-caching-systems) |
 | **Shorter outputs** | Fewer decode steps | `maxTokens`, format instructions, structured output |
 | **Smaller / distilled model** | Faster per-token generation | Check quality with evals; **model distillation** in Bedrock |
 | **Latency-optimised inference** | Faster serving of the same model | Preview, limited models/Regions (4.2.1) |
 | **Streaming** | Better perceived latency | No change in total time |
 | **Speculative decoding** (self-hosted) | A small draft model proposes tokens and the big model verifies them in parallel | Supported in self-hosted inference servers (e.g. LMI/vLLM on SageMaker). Awareness-level (verify in docs) |
 | **Quantised self-hosted models** | Less memory bandwidth per token | INT8/INT4/FP8 on SageMaker with a small accuracy trade-off |
-| **Continuous batching / KV cache** (self-hosted) | Higher GPU utilisation | Handled by modern serving containers ([Task 2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md)) |
+| **Continuous batching / KV cache** (self-hosted) | Higher GPU utilisation | Handled by modern serving containers ([Task 2.2 · Skill 2.2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-222--address-the-llm-specific-challenges-of-deployment)) |
 | **Fewer round trips** | Combine steps, parallelise, avoid needless agent iterations | Often the biggest system-level win |
 
 #### Efficient service communication patterns
 - **Reuse SDK clients and connections:** create clients **outside the Lambda handler** and enable keep-alive (`botocore.config.Config(tcp_keepalive=True)`). Raise `max_pool_connections` (default 10) for high-concurrency workers. This avoids repeated TLS handshakes.
-- **Long-running calls behind proxies and NAT:** idle connections can be dropped (see the NAT/VPC endpoint idle timeout in [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md)), so prefer streaming for long generations.
+- **Long-running calls behind proxies and NAT:** idle connections can be dropped (see the NAT/VPC endpoint idle timeout in [Task 2.4 · Skill 2.4.3](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems)), so prefer streaming for long generations.
 - **Regional proximity:** run compute in the Bedrock Region (or call through CRIS from the home Region), keep the vector store in the same Region, and use **PrivateLink** to stay on the AWS network.
 - **Async and event-driven over synchronous chains:** for anything over a few seconds, return `202 + jobId` and process through SQS/Step Functions/EventBridge. Notify by WebSocket, polling or SNS. This avoids API Gateway timeouts and wasted idle compute.
 - **Avoid chatty microservices** on the hot path. Each extra synchronous hop adds P99 latency. Combine retrieval and generation in one service where it makes sense, or use **RetrieveAndGenerate** to cut round trips.

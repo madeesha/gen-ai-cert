@@ -11,20 +11,16 @@
 > - Skill 4.3.6: FM-specific troubleshooting frameworks (golden datasets, output diffing, reasoning-path tracing, specialised observability pipelines)
 
 ## Key points
-- **Three layers of GenAI telemetry:**
-  - **Metrics** (`AWS/Bedrock`: `Invocations`, `InvocationLatency`, `TimeToFirstToken`, `InputTokenCount`, `OutputTokenCount`, `InvocationThrottles`, `InvocationClientErrors`, `InvocationServerErrors`, `EstimatedTPMQuotaUsage`, `CacheReadInputTokenCount`/`CacheWriteInputTokenCount`)
-  - **Logs** (model invocation logging gives full prompts and responses; it's **off by default**)
-  - **Traces** (X-Ray / OpenTelemetry → CloudWatch **Transaction Search** → **GenAI observability** dashboard)
-- **Throttled requests are not counted** in `Invocations` or the error metrics. Requests rejected for exceeding a quota count as **client errors**, not throttles. Metrics are published both **with and without** the `ModelId` dimension, so filtering by `ModelId` can **undercount errors**.
-- `TimeToFirstToken` only exists for **streaming** APIs (`ConverseStream`, `InvokeModelWithResponseStream`). **OTPS = OutputTokenCount / (InvocationLatency − TimeToFirstToken) × 1000**. Alarm on **OTPS dropping**, not on raw latency, to tell model-side slowdown apart from longer answers.
-- **AgentCore Observability:** OTEL-compatible spans, traces and sessions plus built-in metrics in the `bedrock-agentcore` namespace. Runtime-hosted agents are **auto-instrumented**. Agents hosted elsewhere need **ADOT** (`aws-opentelemetry-distro` + `opentelemetry-instrument`, or the Lambda OTel layer). You must enable **Transaction Search** once per account.
-- **Guardrails metrics** are in `AWS/Bedrock/Guardrails`: `InvocationsIntervened` and `TextUnitCount` by `GuardrailPolicyType` and `GuardrailContentSource` (Input/Output). Use these for a **block-rate** KPI and policy-violation trends.
-- 🎯 **PQ17** **Quality KPIs are custom metrics:** hallucination rate, groundedness, thumbs up/down, refusal rate. Emit them with **EMF** from Lambda or with `PutMetricData`, then use **anomaly detection** (needs about 2 weeks of history) for drift and token bursts.
-- **Cost:** **Cost Anomaly Detection** (ML, per service, cost category or tag) + **AWS Budgets** (threshold and forecast alerts, budget actions). Use **application inference profiles + tags** for per-team cost allocation. Token metrics are the leading indicator; the bill lags behind.
-- **Forensics:** CloudTrail (who called which model, when, from where) + invocation logs (what was said) + traces (what happened) + **immutable storage** (S3 Object Lock, CloudTrail log file validation, KMS).
-- **Tool observability:** track per-tool call count, latency, error rate and argument-validation failures from agent traces or spans. Set **usage baselines** and alert on deviations such as tool loops or a sudden spike in one tool.
-- **Vector stores:** for **OpenSearch Serverless** (`AWS/AOSS`) watch `SearchRequestLatency`, `SearchRequestErrors`, `SearchOCU`, `IndexingOCU`, `IngestionDocumentErrors`, `SearchableDocuments` and `DeletedDocuments`. For **managed OpenSearch**, watch k-NN graph memory and the circuit breaker. For **KB ingestion jobs**, watch scanned, indexed and failed document counts.
-- **GenAI-specific failure modes** are probabilistic: hallucination, drift, inconsistency and reasoning errors. Detect them with **golden datasets**, **output diffing** (semantic similarity between runs or versions), **reasoning-path tracing** (agent traces, extended thinking), and a **Firehose → S3 → Athena/QuickSight** analytics pipeline.
+- **Three layers of telemetry, three questions:** metrics say *how much and how fast*, model invocation logs say *what was said* (off by default), and traces say *where the time went* (4.3.1).
+- **Instrumentation choice:** agents on AgentCore Runtime are auto-instrumented; anything else needs **ADOT**. Either way, turn on **Transaction Search** once per account to get the GenAI observability views (4.3.1).
+- **Built-in `AWS/Bedrock` metrics have traps:** throttles aren't in `Invocations`, quota rejections count as client errors, `TimeToFirstToken` exists only for streaming, and some errors carry no `ModelId` (4.3.2).
+- **Latency went up? Compute OTPS** to tell a slower model apart from longer answers (4.3.2).
+- 🎯 **PQ17** **Quality is not a built-in metric.** Hallucination rate, groundedness and feedback are custom metrics (EMF), and **anomaly detection** on them and on token counts catches drift and bursts (4.3.2).
+- **Cost:** token metrics are the real-time leading indicator, while Cost Anomaly Detection and Budgets catch what the bill shows later (4.3.2).
+- **Actionable means every alarm has an owner and an automated response** (EventBridge → Lambda/runbook). **Forensics** = who (CloudTrail) + what (invocation logs) + why (traces, versions) in tamper-proof storage (4.3.3).
+- **Tools and agents:** per-tool metrics with adaptive baselines find the tool behind a token surge or a loop (4.3.4).
+- **Vector stores:** watch latency and capacity (OCUs, k-NN graph memory), automate index maintenance, and prove retrieval quality with scheduled canaries (4.3.5).
+- **GenAI failures are probabilistic**, so troubleshoot with golden datasets, output diffing, reasoning-path tracing and a Firehose → S3 → Athena analytics pipeline (4.3.6).
 
 ## Notes
 
@@ -51,7 +47,7 @@
 | Need | Service / feature |
 | --- | --- |
 | Built-in FM metrics | CloudWatch `AWS/Bedrock` namespace (runtime), `AWS/Bedrock/Guardrails`, agents metrics (verify in docs for the exact agents namespace) |
-| Full request/response capture | **Model invocation logging** → CloudWatch Logs and/or S3 (setup: [Task 2.5](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md)) |
+| Full request/response capture | **Model invocation logging** → CloudWatch Logs and/or S3 (setup: [Task 2.5 · Skill 2.5.6](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md#skill-256--troubleshooting-fm-applications)) |
 | Distributed tracing | **AWS X-Ray** / **ADOT** → CloudWatch **Transaction Search** (spans stored in the `aws/spans` log group) |
 | Agent tracing | **AgentCore Observability** (sessions, traces, spans, `bedrock-agentcore` metrics); Bedrock Agents `trace` events |
 | Curated GenAI view | CloudWatch **Generative AI observability** page (Overview, Sessions, Traces, Spans tabs) — covers model invocations and agents on AgentCore Runtime *or elsewhere* |
@@ -81,6 +77,7 @@ with tracer.start_as_current_span("chat claude-sonnet") as span:
     span.set_attribute("app.tenant_id", tenant_id)      # custom business dimension
 ```
 - ADOT auto-instrumentation (`opentelemetry-instrument python app.py`) already instruments **botocore** Bedrock calls, Strands and many frameworks. Add custom attributes such as tenant, feature and prompt version for business slicing.
+- **Where instrumentation is needed:** agents on **AgentCore Runtime** are **auto-instrumented** (OTEL-compatible spans, traces and sessions, plus metrics in the `bedrock-agentcore` namespace). Agents hosted elsewhere need **ADOT** (`aws-opentelemetry-distro` + `opentelemetry-instrument`, or the Lambda OTel layer). **Transaction Search** must be enabled once per account.
 - ⚠️ Filter sensitive data out of span attributes. Prompt text in spans is effectively a second copy of your logs, with different retention and access rules.
 
 #### Dashboard design (layered)
@@ -142,7 +139,7 @@ Alarm: OTPS < 80% of baseline, 3 of 5 datapoints   (or anomaly band "Lower than"
 | Prompt effectiveness | Prompt version (Prompt Management ARN/version) + outcome | Tag each call with `prompt_version`. Compare thumbs-up rate, task success and tokens per version. |
 | Hallucination rate | Guardrail contextual grounding results, LLM-as-a-judge on a sample, citation-coverage checks | Async evaluator (Lambda/Step Functions) scores a sample of the logs → `PutMetricData` |
 | Groundedness / relevance | Guardrails **contextual grounding** filter (grounding and relevance scores, thresholds 0–0.99) | Track `InvocationsIntervened` where `GuardrailPolicyType=ContextualGroundingPolicy` |
-| Guardrail block rate | `AWS/Bedrock/Guardrails` → `InvocationsIntervened / Invocations` | Split by `GuardrailContentSource` (Input = attacks or bad requests, Output = model misbehaviour) |
+| Guardrail block rate | `AWS/Bedrock/Guardrails` → `InvocationsIntervened / Invocations` (`TextUnitCount` is also published) | Split by `GuardrailContentSource` (Input = attacks or bad requests, Output = model misbehaviour) and by `GuardrailPolicyType` for policy-violation trends |
 | Response quality (user) | Thumbs up/down, ratings, escalations to a human | Front end → API → EMF metric `Feedback` with dimension `Rating` |
 | Refusal rate | Response text classifier or `stopReason` | Pattern match "I can't help" or use an LLM classifier on a sample |
 | Response length drift | `OutputTokenCount` average per request | Anomaly detection on `OutputTokenCount / Invocations` |
@@ -179,6 +176,12 @@ EMF (Embedded Metric Format) is a structured log line that CloudWatch turns into
 - **Response drift:** anomaly alarms on average output tokens, refusal rate, grounding score and thumbs-down rate. A step change right after a model or prompt version change is drift. Tie it back to the deploy.
 - **Semantic drift** (meaning changes, not just length) needs embeddings. Embed a daily sample of responses (or answers to fixed golden prompts) and track the **centroid cosine distance** against a baseline. Emit it as a custom metric.
 
+```bash
+aws cloudwatch put-anomaly-detector --namespace AWS/Bedrock --metric-name InputTokenCount \
+  --dimensions Name=ModelId,Value=anthropic.claude-sonnet-4-5 --stat Sum
+# then an alarm with ThresholdMetricId pointing to ANOMALY_DETECTION_BAND(m1, 3)
+```
+
 > [!WARNING]
 > **🎯 Practice question 17 — EC2 app calling Bedrock: detect drift from baselines, alert with correlation data within 10 min**
 >
@@ -190,15 +193,8 @@ EMF (Embedded Metric Format) is a structured log line that CloudWatch turns into
 > - ❌ **OpenSearch Observability + Kinesis + PPL:** a pipeline you'd have to build and maintain.
 > - ❌ **Logs + CloudTrail + QuickSight:** CloudTrail doesn't capture token or latency metrics, and QuickSight is BI, not real-time alerting.
 
-```bash
-aws cloudwatch put-anomaly-detector --namespace AWS/Bedrock --metric-name InputTokenCount \
-  --dimensions Name=ModelId,Value=anthropic.claude-sonnet-4-5 --stat Sum
-# then an alarm with ThresholdMetricId pointing to ANOMALY_DETECTION_BAND(m1, 3)
-```
-
 #### Model invocation logs for detailed analysis
-- Captures input body, output body, model ID, token counts, identity (caller ARN) and request ID. Goes to **CloudWatch Logs** and/or **S3**. Large or binary payloads go to S3. **Off by default**, and it is **per account per Region**. Setup and schema are in [Task 2.5](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md).
-- Typical Logs Insights analyses:
+Logging setup, destinations, the record schema and more Logs Insights queries are in [Task 2.5 · Skill 2.5.6](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md#skill-256--troubleshooting-fm-applications). Remember it's **off by default** and set **per account per Region**. For monitoring, the logs answer the questions metrics can't: who is driving cost, which requests were truncated, and whether context is bloating.
 
 ```sql
 -- Top callers by output tokens (who is driving cost?)
@@ -259,7 +255,7 @@ Observability is only *actionable* when every signal has an owner and a response
 #### Compliance monitoring
 - **AWS Config** rules and conformance packs: invocation logging enabled, KMS encryption on log groups and S3, VPC endpoints present, no public buckets for training or KB data.
 - **CloudTrail**: Bedrock control-plane API calls (CreateGuardrail, CreateKnowledgeBase, PutModelInvocationLoggingConfiguration…) are recorded. Runtime invocations appear as events too (management vs data event classification for some runtime APIs: verify in docs). An alert on `DeleteModelInvocationLoggingConfiguration` or guardrail deletion catches tampering.
-- **Security Hub** aggregates findings. **Audit Manager** maps evidence to frameworks (governance depth is in [Task 3.3](../domain-3-ai-safety-security-governance/03-task-3.3-governance-compliance.md)).
+- **Security Hub** aggregates findings. **Audit Manager** maps evidence to frameworks (governance depth is in [Task 3.3 · Skill 3.3.4](../domain-3-ai-safety-security-governance/03-task-3.3-governance-compliance.md#skill-334--continuous-monitoring-and-advanced-governance-controls)).
 
 #### Forensic traceability and audit logging
 To reconstruct "what did the model tell customer X on date Y, and why?", you need:
@@ -274,7 +270,7 @@ To reconstruct "what did the model tell customer X on date Y, and why?", you nee
 - Track session length, turns per conversation, abandonment, rephrasing ("user asked the same thing again" is a strong implicit signal of a bad answer), copy or click-through on citations, and escalation to a human.
 - Store conversation events in DynamoDB or S3 and stream them with **Kinesis Data Firehose** to S3 for analytics.
 - **CloudWatch RUM** captures front-end performance: page load and perceived streaming latency.
-- ⚠️ This is user data, so apply PII redaction (Comprehend or Guardrails sensitive-info masking) before analytics storage. See [Task 3.2](../domain-3-ai-safety-security-governance/02-task-3.2-data-security-privacy.md).
+- ⚠️ This is user data, so apply PII redaction (Comprehend or Guardrails sensitive-info masking) before analytics storage. See [Task 3.2 · Skill 3.2.2](../domain-3-ai-safety-security-governance/02-task-3.2-data-security-privacy.md#skill-322--privacy-preserving-systems-pii-detection-bedrock-privacy-guardrails-retention).
 
 #### Model behaviour pattern tracking
 - Distribution of `stopReason` (`end_turn`, `max_tokens`, `tool_use`, `guardrail_intervened`, `content_filtered`). A rising `max_tokens` share means truncation.
@@ -286,16 +282,6 @@ To reconstruct "what did the model tell customer X on date Y, and why?", you nee
 ### Skill 4.3.4 — Tool performance frameworks 🎯 PQ39
 
 > Create tool performance frameworks to ensure optimal tool operation and utilization for FMs (for example, by using call pattern tracking, performance metric collection, tool calling observability and multi-agent coordination tracking, usage baselines for anomaly detection).
-
-> [!IMPORTANT]
-> **🎯 Practice question 39 — token surges with steady traffic: find which tool integration causes it, thresholds adapt automatically**
->
-> - **Model invocation logging → CloudWatch Logs.**
-> - **CloudWatch metric filters** on the log JSON pull out **per-tool metrics** (for example `toolUse.name` with input and output token counts) as **custom metrics with a tool dimension**.
-> - **CloudWatch anomaly detection alarms** on each tool's metric → the **ML baseline adapts** to hourly, daily and weekly patterns with no manual threshold changes.
-> - ❌ **S3 + Lambda + manually updated alarm thresholds:** not adaptive.
-> - ❌ **Glue + scheduled Athena reports:** not real time, and thresholds don't adapt.
-> - ❌ **Static alarms per tool:** fixed thresholds that don't follow traffic changes.
 
 #### What to measure per tool
 | Metric | Why |
@@ -335,7 +321,17 @@ fields attributes.tool.name as tool, durationNano/1e6 as ms, status.code as stat
   - **Loop detection**: the same tool with the same arguments more than N times in a session. Enforce a cap in code (max iterations) and alert on cap hits.
   - **Sudden new tool usage**, such as a destructive tool called in production for the first time. This may be prompt injection. Send it to security.
   - **Error-rate spike for one tool**: usually a backend outage. Open the circuit breaker so the agent degrades gracefully.
-- Safeguard mechanics (circuit breakers, timeouts, stopping conditions) are in [Task 2.1](../domain-2-implementation-integration/01-task-2.1-agentic-ai-tool-integrations.md).
+- Safeguard mechanics (circuit breakers, timeouts, stopping conditions) are in [Task 2.1 · Skill 2.1.3](../domain-2-implementation-integration/01-task-2.1-agentic-ai-tool-integrations.md#skill-213--safeguarded-ai-workflows).
+
+> [!IMPORTANT]
+> **🎯 Practice question 39 — token surges with steady traffic: find which tool integration causes it, thresholds adapt automatically**
+>
+> - **Model invocation logging → CloudWatch Logs.**
+> - **CloudWatch metric filters** on the log JSON pull out **per-tool metrics** (for example `toolUse.name` with input and output token counts) as **custom metrics with a tool dimension**.
+> - **CloudWatch anomaly detection alarms** on each tool's metric → the **ML baseline adapts** to hourly, daily and weekly patterns with no manual threshold changes.
+> - ❌ **S3 + Lambda + manually updated alarm thresholds:** not adaptive.
+> - ❌ **Glue + scheduled Athena reports:** not real time, and thresholds don't adapt.
+> - ❌ **Static alarms per tool:** fixed thresholds that don't follow traffic changes.
 
 ---
 
@@ -368,7 +364,7 @@ fields attributes.tool.name as tool, durationNano/1e6 as ms, status.code as stat
 | `KNNQueryRequests`, `KNNGraphQueryErrors` | Query volume and errors |
 | Standard: `CPUUtilization`, `JVMMemoryPressure`, `SearchLatency`, `IndexingLatency`, `ClusterStatus.red/yellow`, `FreeStorageSpace` | General cluster health |
 
-- **Memory sizing rule of thumb (HNSW):** about `1.1 × (4 × d + 8 × M) × num_vectors` bytes (d = dimensions, M = HNSW connections), plus replicas. Lower it with byte or binary vectors, **product quantisation** or **disk-based vector search** (on-disk mode with compression). Verify in docs for current mode names.
+- **Memory sizing:** about `1.1 × (4 × d + 8 × M) × num_vectors` bytes, plus replicas. The worked example, the JVM/graph memory split and the quantisation options are in [Task 4.2 · Skill 4.2.2](02-task-4.2-application-performance.md#skill-422--retrieval-performance-relevance-and-speed).
 
 #### Automated index optimisation routines
 | Routine | Purpose | How |
@@ -380,7 +376,7 @@ fields attributes.tool.name as tool, durationNano/1e6 as ms, status.code as stat
 | **Shard rebalancing** | Hot shards | Monitor shard sizes (aim for about 10–50 GB per shard); split or reindex |
 | **ISM policies** | Lifecycle for time-based indexes | Rollover, delete old indexes |
 
-- Index design (sharding, multi-index, HNSW parameters, engines) is in [Task 1.4](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md). Search-side tuning is in [Task 4.2](02-task-4.2-application-performance.md).
+- Index design (sharding, multi-index, HNSW parameters, engines) is in [Task 1.4 · Skill 1.4.3](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md#skill-143--high-performance-vector-database-architectures-at-scale). Search-side tuning is in [Task 4.2 · Skill 4.2.2](02-task-4.2-application-performance.md#skill-422--retrieval-performance-relevance-and-speed).
 
 #### Bedrock Knowledge Base ingestion monitoring
 - Each `StartIngestionJob` has **statistics**: documents scanned, new indexed, modified indexed, deleted, metadata-scanned, and **failed**, plus `failureReasons`. Poll with `GetIngestionJob`, or subscribe to the job status change events. Alarm on `failed > 0` or `status = FAILED`.
@@ -431,7 +427,7 @@ cloudwatch.put_metric_data(Namespace="GenAI/Retrieval",
 
 #### Golden datasets for hallucination detection
 - A curated set of **(question, reference answer, supporting sources)** examples, versioned in S3 and owned by domain experts. Include edge cases, adversarial prompts and "unanswerable" questions where the right output is "I don't know".
-- Run it **on a schedule** (detects drift in a managed model) and **on every change** (prompt, model, KB, chunking). Score with exact or semantic match, a Bedrock evaluation job (LLM-as-a-judge: correctness, faithfulness) or RAG evaluation. Domain 5 covers evaluation mechanics.
+- Run it **on a schedule** (detects drift in a managed model) and **on every change** (prompt, model, KB, chunking). Score with exact or semantic match, a Bedrock evaluation job (LLM-as-a-judge: correctness, faithfulness) or RAG evaluation. Evaluation mechanics and quality gates are in [Task 5.1 · Skill 5.1.4](../domain-5-testing-validation-troubleshooting/01-task-5.1-evaluation-systems.md#skill-514--systematic-quality-assurance-processes--pq37--pq66).
 - Publish the pass rate and hallucination rate as CloudWatch metrics so they appear next to operational metrics and can be alarmed.
 
 #### Output diffing for consistency analysis
@@ -452,9 +448,10 @@ flagged = [p for p in golden if semantic_diff(old[p], new[p]) < 0.85]
 ```
 
 #### Reasoning-path tracing
-- **Bedrock Agents trace**: the orchestration trace includes `rationale` (the model's reasoning text), `invocationInput` (which tool or KB and which arguments), `observation` (the result) and `finalResponse`. Walk the trace to find the step where logic went wrong: a wrong tool, a misread observation, or a missing step.
-- **AgentCore / Strands spans**: a timeline of each model call, tool call and its inputs and outputs. The **trajectory view** in GenAI observability shows the path.
-- **Extended thinking / reasoning content** (models that support it): log the reasoning blocks (with care, since they may contain sensitive content) to see *why* the model concluded something.
+What the trace sources contain (Bedrock Agents trace types, `enableTrace`, reasoning content) is in [Task 3.4 · Skill 3.4.1](../domain-3-ai-safety-security-governance/04-task-3.4-responsible-ai.md#skill-341--transparent-ai-systems). For troubleshooting, the method is to **walk the path step by step and find where the logic went wrong**: a wrong tool, a misread observation, or a missing step.
+- **Bedrock Agents trace:** follow the orchestration steps `rationale` → `invocationInput` (which tool or KB, which arguments) → `observation` (the result) → `finalResponse`.
+- **AgentCore / Strands spans:** a timeline of each model call, tool call and its inputs and outputs. The **trajectory view** in GenAI observability shows the path.
+- **Extended thinking / reasoning content:** log the reasoning blocks (with care, since they may contain sensitive content) to see *why* the model concluded something.
 - Typical findings and fixes:
   - wrong tool chosen → improve tool descriptions
   - correct retrieval but the answer ignores it → instruction ordering or context placement (lost in the middle)
@@ -495,6 +492,9 @@ App feedback events ─────┘                                          
 
 | Scenario cue | Answer |
 | --- | --- |
+| End-to-end trace across API Gateway, Lambda, KB, model, tools | **X-Ray / ADOT** → CloudWatch **Transaction Search**; GenAI observability dashboard |
+| Observe a Strands agent running on EKS (not AgentCore Runtime) | **ADOT** (`aws-opentelemetry-distro`, `opentelemetry-instrument`), `AGENT_OBSERVABILITY_ENABLED=true`, Transaction Search enabled |
+| Agent on AgentCore Runtime — what instrumentation is needed? | None extra; **auto-instrumented** with OTel; metrics in `bedrock-agentcore` namespace |
 | Need TTFT for a chat app on Bedrock | `TimeToFirstToken` metric, **streaming APIs only** (ConverseStream / InvokeModelWithResponseStream) |
 | Latency rose; is the model slower or are answers longer? | Compute **OTPS** = OutputTokenCount / (InvocationLatency − TTFT) × 1000; alarm on an OTPS drop |
 | Error counts look too low when filtered by model | Errors before model resolution have **no `ModelId` dimension**; query without a dimension |
@@ -510,9 +510,7 @@ App feedback events ─────┘                                          
 | Measure guardrail block rate split by input vs output | `AWS/Bedrock/Guardrails` `InvocationsIntervened` by `GuardrailContentSource` |
 | Per-team Bedrock cost visibility + alerts | **Application inference profiles + cost allocation tags**; Budgets / Cost Anomaly Detection |
 | Unexpected Bedrock bill spike detection | **AWS Cost Anomaly Detection** monitor (service / tag) → SNS |
-| End-to-end trace across API Gateway, Lambda, KB, model, tools | **X-Ray / ADOT** → CloudWatch **Transaction Search**; GenAI observability dashboard |
-| Observe a Strands agent running on EKS (not AgentCore Runtime) | **ADOT** (`aws-opentelemetry-distro`, `opentelemetry-instrument`), `AGENT_OBSERVABILITY_ENABLED=true`, Transaction Search enabled |
-| Agent on AgentCore Runtime — what instrumentation is needed? | None extra; **auto-instrumented** with OTel; metrics in `bedrock-agentcore` namespace |
+| Prove what the model told a customer a year ago | Invocation logs in S3 with **Object Lock**, CloudTrail with integrity validation, correlation IDs |
 | Correlate traces across multiple agent runs in one conversation | OTel **baggage** `session.id` |
 | Find which tool is slowing down or breaking the agent | Per-tool spans / agent trace → per-tool latency & error metrics; Gateway metrics |
 | Agent stuck calling the same tool repeatedly | Loop detection on tool-call counts per session + max-iteration cap |
@@ -526,9 +524,24 @@ App feedback events ─────┘                                          
 | Same question gives different answers | Consistency analysis: N runs, embedding-similarity variance → lower temperature / tighten prompt |
 | Agent reached wrong conclusion despite correct data | **Reasoning-path tracing** (agent orchestration trace rationale / spans) |
 | Long-term, SQL-queryable GenAI analytics + BI | CloudWatch Logs → **Firehose** → S3 (Parquet) → Glue → **Athena** → **QuickSight** |
-| Prove what the model told a customer a year ago | Invocation logs in S3 with **Object Lock**, CloudTrail with integrity validation, correlation IDs |
 
 ## Flashcards
+
+<details>
+<summary><b>Q:</b> What one-time account setup does AgentCore Observability need before spans appear?</summary>
+
+Turn on CloudWatch Transaction Search. It sends X-Ray spans to CloudWatch Logs (the `aws/spans` log group). `agentcore deploy` can turn it on for you.
+
+*D4 · Task 4.3 · AgentCore Observability*
+</details>
+
+<details>
+<summary><b>Q:</b> A Strands agent runs on EKS. How do you get its traces into the CloudWatch GenAI observability dashboard?</summary>
+
+Use ADOT. Add `aws-opentelemetry-distro`, set the OTEL env vars (including `AGENT_OBSERVABILITY_ENABLED=true` and `OTEL_RESOURCE_ATTRIBUTES=service.name=...`), and run with `opentelemetry-instrument`. On Lambda, use the ADOT Lambda layer instead.
+
+*D4 · Task 4.3 · AgentCore Observability*
+</details>
 
 <details>
 <summary><b>Q:</b> Which Bedrock metric measures time to the first streamed token, and when is it published?</summary>
@@ -603,30 +616,6 @@ Alarm on `ModelInvocationLogsCloudWatchDeliveryFailure` / `ModelInvocationLogsS3
 </details>
 
 <details>
-<summary><b>Q:</b> What one-time account setup does AgentCore Observability need before spans appear?</summary>
-
-Turn on CloudWatch Transaction Search. It sends X-Ray spans to CloudWatch Logs (the `aws/spans` log group). `agentcore deploy` can turn it on for you.
-
-*D4 · Task 4.3 · AgentCore Observability*
-</details>
-
-<details>
-<summary><b>Q:</b> A Strands agent runs on EKS. How do you get its traces into the CloudWatch GenAI observability dashboard?</summary>
-
-Use ADOT. Add `aws-opentelemetry-distro`, set the OTEL env vars (including `AGENT_OBSERVABILITY_ENABLED=true` and `OTEL_RESOURCE_ATTRIBUTES=service.name=...`), and run with `opentelemetry-instrument`. On Lambda, use the ADOT Lambda layer instead.
-
-*D4 · Task 4.3 · AgentCore Observability*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you link traces from several agent invocations in the same user conversation?</summary>
-
-Put a session ID in OpenTelemetry baggage (`baggage.set_baggage("session.id", session_id)`).
-
-*D4 · Task 4.3 · Tracing*
-</details>
-
-<details>
 <summary><b>Q:</b> Why emit custom GenAI quality metrics with EMF rather than `PutMetricData`?</summary>
 
 EMF is a structured log line that CloudWatch turns into metrics asynchronously. There's no extra API call or API throttling, and the full log context stays queryable. Keep high-cardinality fields such as requestId as log fields, not dimensions.
@@ -670,6 +659,14 @@ You need:
 - tamper-proof storage (S3 Object Lock, CloudTrail log file validation, KMS) with explicit retention
 
 *D4 · Task 4.3 · Forensics*
+</details>
+
+<details>
+<summary><b>Q:</b> How do you link traces from several agent invocations in the same user conversation?</summary>
+
+Put a session ID in OpenTelemetry baggage (`baggage.set_baggage("session.id", session_id)`).
+
+*D4 · Task 4.3 · Tracing*
 </details>
 
 <details>
