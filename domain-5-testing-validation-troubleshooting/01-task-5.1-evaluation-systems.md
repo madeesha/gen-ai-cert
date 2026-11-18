@@ -15,19 +15,16 @@
 > - Skill 5.1.9: Deployment validation (synthetic user workflows, hallucination rate, semantic drift, consistency checks)
 
 ## Key points
-- GenAI output is **open-ended and non-deterministic**, so there's rarely one correct label. You score **quality dimensions** (relevance, correctness, faithfulness, completeness, coherence, fluency, harmfulness) instead of accuracy/F1 alone. Combine **reference-based** metrics (ROUGE, BLEU, BERTScore, F1) with **reference-free** judges (LLM-as-a-judge) and **humans**.
-- **Bedrock Evaluations** has 4 job types: **automatic / programmatic** (built-in or custom dataset; accuracy · robustness · toxicity), **human-based** (your own work team), **LLM-as-a-judge** model evaluation, and **RAG evaluation** (retrieve-only or retrieve-and-generate). All write reports to **S3** and show results in the console.
-- Programmatic task types and algorithms: general text generation (**RWK** score on TREX · robustness via **word error rate** on BOLD/TREX/WikiText2 · toxicity on RealToxicityPrompts/BOLD) · summarisation (**BERTScore** on Gigaword) · Q&A (**NLP-F1** on BoolQ/NaturalQuestions/TriviaQA) · classification (**accuracy** on Women's E-commerce Clothing Reviews). Robustness = **delta** of the score when prompts are perturbed.
-- LLM-as-a-judge built-ins: `Builtin.Correctness`, `Completeness`, `Faithfulness`, `Helpfulness`, `Coherence`, `Relevance`, `FollowingInstructions`, `ProfessionalStyleAndTone` plus responsible AI `Harmfulness`, `Stereotyping`, `Refusal`. **Custom metrics** use your own judge prompt and rating scale.
-- **Bring your own inference responses (BYOI):** add `modelResponses[{response, modelIdentifier}]` to the JSONL. Bedrock **skips invocation** and just judges, so it works for **SageMaker, on-prem or third-party** models. One `modelIdentifier` per job. Up to **1,000 prompts** per judge dataset.
-- RAG eval: **retrieve-only** → `ContextRelevance`, `ContextCoverage` (coverage **needs ground truth**). **Retrieve-and-generate** → Correctness, Completeness, Helpfulness, LogicalCoherence, **Faithfulness** (hallucination vs retrieved text), **CitationPrecision**, **CitationCoverage**, Harmfulness, Stereotyping, Refusal. Works for **Bedrock KBs or external RAG** (BYOI).
-- Classic IR metrics for retrieval testing: **precision@k**, **recall@k**, **MRR** (rank of first relevant hit), **nDCG** (graded relevance plus position), **hit rate**. Also measure **retrieval latency p50/p95/p99** separately from generation latency.
-- Agents: measure **task / goal completion rate**, **tool selection accuracy**, **tool parameter accuracy**, steps/turns per task, cost and latency per task, and **trajectory / reasoning quality**. **AgentCore Evaluations** has built-in evaluators at **session** (goal success rate), **trace** (correctness, faithfulness, helpfulness, …) and **tool** levels (tool selection / parameter accuracy). It runs **on-demand, batch or online** over OpenTelemetry traces.
-- **A/B** = split live traffic between variants and compare business and quality KPIs. **Canary** = a small % on the new model/prompt with automatic rollback on alarms. **Shadow** = mirror traffic, don't serve, compare offline. Tools: **AppConfig** feature flags with deployment strategies, **SageMaker production variants** (weighted) and **shadow tests**, and Prompt Management versions.
-- Cost-performance means **quality per dollar**: tokens per task, $/1k requests, **latency-to-quality ratio** and business KPIs (deflection rate, CSAT, conversion). Pick the **cheapest model that clears the quality bar**, not the top scorer.
-- User feedback: thumbs up/down and ratings via **API Gateway → Lambda → DynamoDB/S3**, joined to the **invocation log by request ID**. Expert labelling uses **SageMaker Ground Truth** (custom templates, private workforce) or **Amazon A2I** (human review loops triggered by low confidence).
-- QA = **golden datasets** + **regression tests** on every prompt, model or KB change + **automated quality gates** (CodeBuild runs the eval and fails the stage below a threshold) + **continuous evaluation** on sampled production traffic.
-- Deployment validation: **CloudWatch Synthetics canaries** / synthetic user journeys, **hallucination rate** (faithfulness below threshold), **semantic drift** (embedding distance between old and new answers), **response consistency** (same prompt N times → similarity variance), plus CloudWatch alarms → **automatic rollback**.
+- **Mental model:** GenAI output is open-ended and non-deterministic, so you score **quality dimensions** (relevance, correctness, faithfulness, consistency, fluency, safety) with a **layered stack**: deterministic checks → reference metrics → LLM-as-a-judge → humans → business KPIs. → [5.1.1](#skill-511--assessment-frameworks-beyond-traditional-ml)
+- **Metric by task:** translation → BLEU · summarisation → ROUGE / BERTScore · extractive Q&A → F1 · fluency → perplexity · open-ended, no single reference → **LLM-as-a-judge** · brand voice / domain nuance → **humans**. → [5.1.1](#skill-511--assessment-frameworks-beyond-traditional-ml)
+- **Bedrock Evaluations: choose the job type by who scores.** Built-in algorithms on standard datasets (**programmatic**: accuracy, robustness, toxicity), your own **work team** (human), an **evaluator model** (LLM-as-a-judge), or **RAG evaluation** (retrieve-only vs retrieve-and-generate). Model outside Bedrock or external RAG → **BYOI** (Bedrock only judges). → [5.1.2](#skill-512--systematic-model-evaluation-to-find-optimal-configurations), [5.1.5](#skill-515--multi-perspective-assessment-rag-eval-llm-as-a-judge-human-feedback)
+- **Optimal configuration = cheapest model + prompt + parameters that clears every quality threshold** (Pareto), not the top scorer. → [5.1.2](#skill-512--systematic-model-evaluation-to-find-optimal-configurations)
+- **Online testing:** A/B for business impact · canary (small %, **auto-rollback** on alarms) for safe release · shadow (mirrored, **not served**) for zero user exposure. → [5.1.2](#skill-512--systematic-model-evaluation-to-find-optimal-configurations)
+- **User feedback lives or dies on the join key** (`requestId` shared with the invocation log). Batch expert labelling → **Ground Truth**; production review loops on low confidence → **A2I**. → [5.1.3](#skill-513--user-centred-evaluation-mechanisms)
+- **QA = versioned golden dataset + regression tests on every change + CodeBuild quality gate that fails the stage + continuous evaluation on sampled traffic.** → [5.1.4](#skill-514--systematic-quality-assurance-processes--pq37--pq66)
+- **RAG: test retrieval separately from generation.** Low context relevance → fix retrieval; high relevance but low faithfulness → fix generation; high faithfulness but low correctness → fix the KB content. → [5.1.5](#skill-515--multi-perspective-assessment-rag-eval-llm-as-a-judge-human-feedback), [5.1.6](#skill-516--retrieval-quality-testing)
+- **Agents are scored at three levels** (session goal success, trace quality, tool selection/parameters) with **AgentCore Evaluations**; classic Bedrock Agents → `enableTrace` + scenario suites. → [5.1.7](#skill-517--agent-performance-frameworks)
+- **Reporting and release:** QuickSight for stakeholders, CloudWatch dashboards for ops ([5.1.8](#skill-518--stakeholder-reporting)). Deployment validation = judge evals vs baseline (hallucination rate) + Synthetics canaries + embedding drift/consistency + alarm-driven rollback ([5.1.9](#skill-519--deployment-validation-systems--pq21)).
 
 ## Notes
 
@@ -35,7 +32,7 @@
 
 > Develop comprehensive assessment frameworks to evaluate the quality and effectiveness of FM outputs beyond traditional ML evaluation approaches (for example, by using metrics for relevance, factual accuracy, consistency, and fluency).
 
-**Why traditional ML metrics aren't enough**
+#### Why traditional ML metrics aren't enough
 
 | Traditional ML | GenAI / FMs |
 | --- | --- |
@@ -46,7 +43,7 @@
 | Test set fixed at training time | Behaviour also depends on **prompt**, **context (RAG)**, **tools**, **model version** |
 | Failure = wrong label | Failure = hallucination, unfaithful to context, off-topic, unsafe, wrong format, refusal, verbosity |
 
-**Core quality dimensions (know the definitions)**
+#### Core quality dimensions (know the definitions)
 
 | Dimension | Question it answers | Typical measurement |
 | --- | --- | --- |
@@ -62,7 +59,7 @@
 | **Refusal appropriateness** | Refuses when it should, answers when it should? | `Refusal` metric + labelled should-refuse set |
 | **Efficiency** | Tokens, latency, cost per useful answer | CloudWatch `InputTokenCount` / `OutputTokenCount` / `InvocationLatency` |
 
-**Reference-based (n-gram / embedding) metrics: when each fits**
+#### Reference-based (n-gram / embedding) metrics: when each fits
 
 | Metric | What it computes | Good for | Weakness |
 | --- | --- | --- | --- |
@@ -78,12 +75,12 @@
 
 > Exam rule of thumb: **translation → BLEU**, **summarisation → ROUGE** (or BERTScore), **extractive Q&A → F1 / exact match**, **fluency → perplexity**, **open-ended quality with no single reference → LLM-as-a-judge**, **subjective/brand/tone → human evaluation**.
 
-**Reference-free evaluation**
-- **LLM-as-a-judge**: a strong model scores the output against a rubric (with or without a reference). It scales and explains its scores, but it can be biased: **position bias**, **verbosity bias**, **self-preference** (a judge favours its own model family). Mitigations: use a *different* family as judge, randomise order in pairwise tests, give a clear rubric with anchored scale points, and calibrate against a human-labelled sample.
+#### Reference-free evaluation
+- **LLM-as-a-judge**: a strong model scores the output against a rubric (with or without a reference). It scales and explains its scores, but it has known biases. Biases and mitigations are in [5.1.5](#llm-as-a-judge-best-practices).
 - **Rules/deterministic checks**: JSON Schema validation, regex for required disclaimers, max length, banned terms, citation present. These are cheap and exact, so run them first.
 - **Human evaluation**: the gold standard for nuance, brand voice, domain correctness and safety edge cases. It is slow and expensive, so use it to calibrate the judges and for high-risk releases.
 
-**A layered evaluation framework (design pattern)**
+#### A layered evaluation framework (design pattern)
 ```
 Layer 0  Deterministic checks      schema/format, length, PII regex, citation present     (every response, ~free)
 Layer 1  Reference metrics         F1 / ROUGE / BERTScore on golden set                   (every build)
@@ -100,7 +97,7 @@ Layer 4  Business KPIs             deflection, CSAT, conversion, escalation rate
 
 > Create systematic model evaluation systems to identify optimal configurations (for example, by using Amazon Bedrock Model Evaluations, A/B testing and canary testing of FMs, multi-model evaluation, cost-performance analysis to measure token efficiency, latency-to-quality ratios, and business outcomes).
 
-**Amazon Bedrock Evaluations: job types**
+#### Amazon Bedrock Evaluations: job types
 
 | Job type | Who scores | Needs | Output | Use when |
 | --- | --- | --- | --- | --- |
@@ -115,7 +112,7 @@ Layer 4  Business KPIs             deflection, CSAT, conversion, escalation rate
 - Human jobs need **CORS** on the S3 bucket. LLM-as-a-judge jobs **don't need CORS**.
 - Evaluation job create, stop and delete actions are logged as **CloudTrail management events**.
 
-**Automatic (programmatic) tasks: built-in datasets and algorithms**
+#### Automatic (programmatic) tasks: built-in datasets and algorithms
 
 | Task type | Accuracy | Robustness | Toxicity |
 | --- | --- | --- | --- |
@@ -127,7 +124,26 @@ Layer 4  Business KPIs             deflection, CSAT, conversion, escalation rate
 - **Robustness** = how much the score drops when prompts are slightly perturbed (typos, casing, whitespace). This is the "delta" metrics.
 - One **task type per job**.
 
-**LLM-as-a-judge job (boto3 sketch)**
+#### LLM-as-a-judge jobs: metrics, dataset and BYOI
+
+Programmatic jobs give an objective baseline; for open-ended quality you hand scoring to an evaluator model.
+
+- **Built-in judge metrics:** `Builtin.Correctness`, `Completeness`, `Faithfulness`, `Helpfulness`, `Coherence`, `Relevance`, `FollowingInstructions`, `ProfessionalStyleAndTone`, plus the responsible AI metrics `Harmfulness`, `Stereotyping` and `Refusal`. **Custom metrics** (below) use your own judge prompt and rating scale.
+
+**Prompt dataset JSONL**
+```json
+{"prompt":"What is our refund window for annual plans?","referenceResponse":"30 days from purchase.","category":"billing"}
+```
+BYOI variant (**bring your own inference responses**: Bedrock skips invocation and only judges, so it works for **SageMaker, on-prem or third-party** models):
+```json
+{"prompt":"What is our refund window?","referenceResponse":"30 days.","category":"billing",
+ "modelResponses":[{"response":"You can get a refund within 30 days.","modelIdentifier":"sagemaker-llama-ft-v3"}]}
+```
+- `referenceResponse` is optional. When it's present, **Correctness** and **Completeness** use it.
+- `category` makes the report break scores down **per category**.
+- BYOI allows **one response per prompt** and **one `modelIdentifier` per job**. To compare 3 external models, run 3 jobs and compare the reports.
+
+**Creating the job (boto3 sketch)**
 ```python
 bedrock = boto3.client("bedrock")
 bedrock.create_evaluation_job(
@@ -151,31 +167,20 @@ bedrock.create_evaluation_job(
 ```
 > The field names follow the CreateEvaluationJob API shape. Check the exact nesting in the docs (verify in docs) before using this in a pipeline.
 
-**Prompt dataset JSONL**
-```json
-{"prompt":"What is our refund window for annual plans?","referenceResponse":"30 days from purchase.","category":"billing"}
-```
-BYOI variant (Bedrock skips invocation and only judges):
-```json
-{"prompt":"What is our refund window?","referenceResponse":"30 days.","category":"billing",
- "modelResponses":[{"response":"You can get a refund within 30 days.","modelIdentifier":"sagemaker-llama-ft-v3"}]}
-```
-- `referenceResponse` is optional. When it's present, **Correctness** and **Completeness** use it.
-- `category` makes the report break scores down **per category**.
-- BYOI allows **one response per prompt** and **one `modelIdentifier` per job**. To compare 3 external models, run 3 jobs and compare the reports.
-
 **Custom metrics**
 - You write the **judge prompt** (with placeholders such as `{{prompt}}` and `{{prediction}}`, plus `{{ground_truth}}` if available) and define a **rating scale** (numerical or categorical with definitions). Use them for business-specific checks such as "mentions the mandatory compliance disclaimer" or "uses our product terminology".
 - Custom metrics support a slightly different list of judge models than built-in metrics (verify in docs).
 
-**Multi-model evaluation workflow**
+#### Multi-model evaluation workflow
+The job types above are the building blocks. Comparing candidates fairly means running them the same way:
+
 1. Build a **representative golden dataset** of 200–1,000 prompts, stratified by intent, difficulty and language, including **edge cases** and **should-refuse** prompts.
 2. Run the same dataset through each candidate (Bedrock models directly, others with BYOI) using **identical inference parameters** (temperature 0 for comparability).
 3. Score with the same **judge + metrics**, plus deterministic checks.
 4. Collect **cost and latency** for each candidate: tokens from the response `usage` or CloudWatch, and latency p50/p95.
 5. Compare on a **quality vs cost** and **quality vs latency** plot. Choose the **Pareto-optimal** model that meets every threshold.
 
-**Cost-performance analysis**
+#### Cost-performance analysis
 
 | Metric | Formula / source |
 | --- | --- |
@@ -189,7 +194,8 @@ BYOI variant (Bedrock skips invocation and only judges):
 - **Prompt routers** (Intelligent Prompt Routing) can be evaluated as the generator, which tells you whether routing keeps quality while cutting cost.
 - Inference parameters (temperature, top-p, max tokens) and the **prompt version** are part of the *configuration* under test. Evaluate the combination of **model + prompt + parameters + KB settings**, not the model alone.
 
-**A/B, canary and shadow testing of FMs (online evaluation)**
+#### A/B, canary and shadow testing of FMs (online evaluation)
+Offline evaluation picks the candidate; online tests confirm it on real traffic.
 
 | Pattern | Traffic | Risk | Measures | AWS mechanisms |
 | --- | --- | --- | --- | --- |
@@ -209,7 +215,7 @@ BYOI variant (Bedrock skips invocation and only judges):
 
 > Develop user-centered evaluation mechanisms to continuously improve FM performance based on user experience (for example, by using feedback interfaces, rating systems for model outputs, annotation workflows to assess response quality).
 
-**Feedback signals**
+#### Feedback signals
 
 | Type | Example | Strength | Weakness |
 | --- | --- | --- | --- |
@@ -220,7 +226,7 @@ BYOI variant (Bedrock skips invocation and only judges):
 | **Implicit** | Copy/accept rate, regenerate clicks, follow-up rephrase, escalation to human, session abandonment, dwell time | No user effort | Noisy, needs interpretation |
 | **Expert annotation** | SMEs label correctness, severity, category | High quality | Expensive, slow |
 
-**Reference architecture: feedback capture**
+#### Reference architecture: feedback capture
 ```
 UI (Amplify / web)  --POST /feedback {requestId, sessionId, rating, reasonCode, comment}-->
 API Gateway (request validation model, throttling, Cognito authoriser)
@@ -239,7 +245,7 @@ Bedrock model invocation logs (S3 / CloudWatch Logs) joined on requestId
   - update the KB when answers are missing or outdated
 - Apply **privacy controls** to free-text feedback (it can contain PII): Comprehend PII redaction before storage, and retention lifecycle rules. See [Task 3.2](../domain-3-ai-safety-security-governance/02-task-3.2-data-security-privacy.md).
 
-**Annotation workflows**
+#### Annotation workflows
 
 | Service | Use |
 | --- | --- |
@@ -258,16 +264,7 @@ Bedrock model invocation logs (S3 / CloudWatch Logs) joined on requestId
 
 > Create systematic quality assurance processes to maintain consistent performance standards for FMs (for example, by using continuous evaluation workflows, regression testing for model outputs, automated quality gates for deployments).
 
-> [!IMPORTANT]
-> **🎯 Practice question 37 — 500 → 2,000+ golden examples, semantic similarity, scheduled, dashboards, alerts**
->
-> - **EventBridge scheduled rule** → **Lambda** runs the golden set (invoke the FM, embed the output and the expected answer, compute **semantic similarity**) → **CloudWatch custom metrics** (`PutMetricData` / EMF) → **dashboards + alarms**. Lambda fans out, so going from 500 to 2,000+ cases needs **no architecture change**.
-> - ❌ **Step Functions + DynamoDB:** no built-in semantic scoring, and lots of state transitions at this volume (per the answer key).
-> - ❌ **CloudWatch Synthetics canaries:** **uptime, availability and simple assertions**, not semantic regression on 2,000 cases.
-> - ❌ **Comprehend sentiment or key phrases:** says nothing about **semantic equivalence** to the expected answer.
-> - 🔁 **Compare with PQ21:** there, canaries **replay user workflows** as one part of deployment validation. Here they can't be the **semantic evaluator**.
-
-**What can regress (anything below can change outputs)**
+#### What can regress (anything below can change outputs)
 - the model ID or version (provider updates, migrating to a newer generation)
 - inference parameters
 - prompt template or system prompt version
@@ -278,8 +275,8 @@ Bedrock model invocation logs (S3 / CloudWatch Logs) joined on requestId
 - the agent's instructions or action groups
 - upstream data formats
 
-**Regression testing for model outputs**
-- A **golden dataset** is a versioned set of inputs, each with expected properties: a reference answer, required facts, a must-cite source, must refuse, a JSON schema, a max length. Store it in **S3 or Git** next to the prompts, and version it with them.
+#### Regression testing for model outputs
+- 🎯 **PQ30** A **golden dataset** is a versioned set of inputs, each with expected properties: a reference answer, required facts, a must-cite source, must refuse, a JSON schema, a max length. Store it in **S3 or Git** next to the prompts, and version it with them. Include **paraphrased versions** of key questions so consistency is tested too (PQ30 callout: [Task 3.1 · Skill 3.1.3](../domain-3-ai-safety-security-governance/01-task-3.1-input-output-safety-controls.md#skill-313--accuracy-verification-systems-to-reduce-hallucinations)).
 - Assertions, from strictest to loosest:
   1. **Exact / structural**: valid JSON against the schema, required keys, enum values, tool called with the right parameters.
   2. **Contains / regex**: a required disclaimer or citation is present; banned phrases are absent.
@@ -288,7 +285,7 @@ Bedrock model invocation logs (S3 / CloudWatch Logs) joined on requestId
 - Use **temperature 0** (or a low value) plus several runs to reduce noise. Track the **pass rate per category**, not just single cases.
 - Compare against the **baseline** (the current production version). Fail the build on a **statistically meaningful drop**, not a 1-case wobble. A common rule is "pass rate drops > 2 percentage points, or any critical case fails".
 
-**Automated quality gates (CodePipeline)**
+#### Automated quality gates (CodePipeline)
 ```
 Source (Git: prompts/, flows/, golden/, infra/)
   → Build (CodeBuild: lint prompt templates, unit tests, schema checks, security scan)
@@ -317,11 +314,20 @@ artifacts:
 - A Bedrock evaluation job runs **asynchronously**. Either poll `GetEvaluationJob` until it's complete and then parse the S3 results, or use a **Step Functions** stage that waits and polls. For fast per-commit checks, many teams run a small in-house harness and run the full Bedrock evaluation job nightly or before a release.
 - Cross-reference: prompt-level QA (Lambda output verifiers, Step Functions edge-case tests, CloudWatch prompt regression) is in [Task 1.6](../domain-1-fm-integration-data-compliance/06-task-1.6-prompt-engineering-governance.md). CI/CD pipeline architecture is in [Task 2.3](../domain-2-implementation-integration/03-task-2.3-enterprise-integration-architectures.md).
 
-**Continuous evaluation (after deployment)**
+#### Continuous evaluation (after deployment)
 - **Sample production traffic** (for example 1–5%) from the **model invocation logs**. Use **EventBridge Scheduler** to run a Lambda or Step Functions job each night that scores the sample with an LLM judge or a Bedrock evaluation job using BYOI (the logged responses). Publish the scores as **CloudWatch custom metrics**.
 - Alarm on **trends**: faithfulness falling, refusal rate rising, negative-feedback rate rising, guardrail intervention rate rising, tokens per answer rising.
 - Re-run the golden set when a **provider updates a model**, on a **schedule**, and on **every config change**.
 - AgentCore Evaluations **online evaluation** continuously scores sampled agent traces. Domain 4 [Task 4.3](../domain-4-operational-efficiency-optimization/03-task-4.3-monitoring-observability.md) covers the monitoring side: dashboards, anomaly detection and golden-dataset hallucination checks in operation.
+
+> [!IMPORTANT]
+> **🎯 Practice question 37 — 500 → 2,000+ golden examples, semantic similarity, scheduled, dashboards, alerts**
+>
+> - **EventBridge scheduled rule** → **Lambda** runs the golden set (invoke the FM, embed the output and the expected answer, compute **semantic similarity**) → **CloudWatch custom metrics** (`PutMetricData` / EMF) → **dashboards + alarms**. Lambda fans out, so going from 500 to 2,000+ cases needs **no architecture change**.
+> - ❌ **Step Functions + DynamoDB:** no built-in semantic scoring, and lots of state transitions at this volume (per the answer key).
+> - ❌ **CloudWatch Synthetics canaries:** **uptime, availability and simple assertions**, not semantic regression on 2,000 cases.
+> - ❌ **Comprehend sentiment or key phrases:** says nothing about **semantic equivalence** to the expected answer.
+> - 🔁 **Compare with PQ21:** there, canaries **replay user workflows** as one part of deployment validation. Here they can't be the **semantic evaluator**.
 
 ---
 
@@ -329,7 +335,8 @@ artifacts:
 
 > Develop comprehensive assessment systems to ensure thorough evaluation from multiple perspectives for FM outputs (for example, by using RAG evaluation, automated quality assessment with LLM-as-a-Judge techniques, human feedback collection interfaces).
 
-**Why multiple perspectives?** Each method has blind spots:
+#### Why multiple perspectives?
+Each method has blind spots:
 
 | Perspective | Catches | Misses |
 | --- | --- | --- |
@@ -340,7 +347,7 @@ artifacts:
 | End users | Real usefulness, UX | Expert correctness; biased by tone/confidence |
 | Business KPIs | Actual impact | Root cause |
 
-**Bedrock RAG evaluation**
+#### Bedrock RAG evaluation
 
 Two job types:
 - **Retrieve only**: evaluates retrieval quality only, from a Bedrock KB (`Retrieve`) or **your own retrieval results** (BYOI from any RAG system).
@@ -363,7 +370,11 @@ Two job types:
 | `Builtin.Harmfulness` · `Builtin.Stereotyping` · `Builtin.Refusal` | Responsible AI metrics |
 
 - The RAG dataset contains queries plus **ground truth** (expected retrieved text and/or expected answer). The evaluator models must be ones you have access to.
-- **Diagnose by combining metrics:**
+- Compare **multiple KB configurations** (chunking strategy, embedding model, reranker on or off, top-k) with the **same dataset**. That's the main use of RAG evaluation jobs.
+- **RAGAS-style** open-source metrics map closely: *faithfulness*, *answer relevancy*, *context precision* (are relevant chunks ranked high?), *context recall* (does the context cover the ground truth?), *answer correctness*. Bedrock's `ContextRelevance` and `ContextCoverage` are roughly context precision and context recall.
+
+#### Diagnosing RAG by combining metrics
+No single RAG metric localises a fault; read them in pairs:
 
 | Low metric | High metric | Likely cause | Fix |
 | --- | --- | --- | --- |
@@ -373,18 +384,17 @@ Two job types:
 | Correctness | Faithfulness | Faithful to **wrong/outdated** sources | Fix the KB content / sync / metadata filters |
 | Citation coverage | Correctness | Answer right but not attributed | Prompt to cite; use RetrieveAndGenerate citations |
 
-- Compare **multiple KB configurations** (chunking strategy, embedding model, reranker on or off, top-k) with the **same dataset**. That's the main use of RAG evaluation jobs.
-- **RAGAS-style** open-source metrics map closely: *faithfulness*, *answer relevancy*, *context precision* (are relevant chunks ranked high?), *context recall* (does the context cover the ground truth?), *answer correctness*. Bedrock's `ContextRelevance` and `ContextCoverage` are roughly context precision and context recall.
-
-**LLM-as-a-judge best practices**
+#### LLM-as-a-judge best practices
+- Know the three biases: **position bias**, **verbosity / length bias** and **self-preference** (favours its own model family).
 - Use a **strong judge from a different family** than the generator to avoid self-preference bias.
 - Give **explicit rubrics** with anchored scale definitions, and ask for **reasoning before the score**. Bedrock returns explanations with each score.
 - Choose the mode deliberately: **pointwise** scoring is absolute and good for gates, **pairwise** comparison is better at finding which of two is better, and **reference-guided** grading is more accurate when you have ground truth.
-- **Swap positions** in pairwise tests, and watch for **length bias**.
-- **Calibrate**: score a human-labelled subset with the judge and check the correlation and agreement before trusting it.
+- **Swap or randomise positions** in pairwise tests, and watch for **length bias**.
+- **Calibrate**: score a human-labelled sample with the judge and check the correlation and agreement before trusting it.
 - A judge **costs tokens** as well, so sample production traffic and keep the golden sets reasonably sized.
 
-**Human feedback collection interfaces** are covered in [5.1.3](#skill-513--user-centred-evaluation-mechanisms). Bedrock **human evaluation jobs** use your own work team, managed through Bedrock or SageMaker Ground Truth private workforces, and need **CORS** on the S3 bucket. Use them for **final sign-off** on high-stakes changes and to build **judge calibration** sets.
+#### Human evaluation as the third perspective
+Human feedback collection interfaces are covered in [5.1.3](#skill-513--user-centred-evaluation-mechanisms). Bedrock **human evaluation jobs** use your own work team, managed through Bedrock or SageMaker Ground Truth private workforces, and need **CORS** on the S3 bucket. Use them for **final sign-off** on high-stakes changes and to build **judge calibration** sets.
 > Older materials mention an "AWS-managed work team" option for Bedrock human evaluation. Current docs describe teams of **your own employees or SMEs** (verify in docs whether the AWS-managed option is still offered).
 
 ---
@@ -395,7 +405,7 @@ Two job types:
 
 Test retrieval **independently of generation**. A good generator can hide poor retrieval, and the reverse is also true.
 
-**Building a retrieval test set**
+#### Building a retrieval test set
 - Each item is a query plus its **relevant document/chunk IDs**, optionally with **graded relevance** (0 = irrelevant, 1 = partial, 2 = highly relevant).
 - Sources:
   - real user queries from logs, labelled by SMEs
@@ -403,7 +413,7 @@ Test retrieval **independently of generation**. A good generator can hide poor r
   - hard negatives: near-miss documents
 - Include **filtered** queries (metadata filters such as tenant, date or product), **multi-hop** queries, keyword-heavy queries (SKUs, error codes) and **multilingual** queries if relevant.
 
-**Metrics**
+#### Retrieval metrics
 
 | Metric | Formula / idea | Use |
 | --- | --- | --- |
@@ -416,12 +426,12 @@ Test retrieval **independently of generation**. A good generator can hide poor r
 | **Context relevance / coverage** (LLM-judged) | Bedrock RAG eval retrieve-only | When no chunk-ID labels exist |
 | **Similarity score distribution** | Retrieve API `score` per result | Pick a minimum-score cutoff; detect "no good match" |
 
-**Context matching verification**
+#### Context matching verification
 - Check that the **expected source** (document ID or S3 URI) appears in the retrieved results or in the response **citations**. RetrieveAndGenerate returns `citations[].retrievedReferences[].location`.
 - Check **metadata filter correctness**: a tenant-A query must **never** return tenant-B chunks. Make this a hard security test.
 - Check **freshness**: after updating a document and syncing, the new version is returned and the old one isn't. This validates the sync pipeline from [Task 1.4](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md).
 
-**Retrieval latency measurement**
+#### Retrieval latency measurement
 - Time the `Retrieve` call, the vector DB query (OpenSearch `took`, Aurora `EXPLAIN ANALYZE`), the reranker and the embedding of the query **separately**. Report **p50/p95/p99**.
 - Load-test at the expected QPS (for example with the **Distributed Load Testing on AWS** solution, Locust or k6). Watch OpenSearch Serverless OCU scaling, search latency and **k-NN memory / circuit breaker** metrics. Domain 4 covers the tuning.
 - Trade-offs to measure explicitly:
@@ -430,7 +440,7 @@ Test retrieval **independently of generation**. A good generator can hide poor r
   - **hybrid search**: helps keyword queries but costs more compute
   - **HNSW `ef_search`**: higher gives better recall but slower queries
 
-**Experiment loop (grid search)**
+#### Experiment loop (grid search)
 ```
 for chunking in [fixed-300, fixed-512, hierarchical, semantic]:
   for embed in [titan-v2-1024, titan-v2-512, cohere-v3]:
@@ -448,7 +458,7 @@ pick config on the recall/latency/cost frontier → confirm with Bedrock RAG eva
 
 Agents fail in ways a single model call doesn't: wrong tool, wrong parameters, loops, giving up early, overly long trajectories, ignoring tool errors, or claiming success that didn't happen.
 
-**Agent metric framework**
+#### Agent metric framework
 
 | Level | Metric | How to measure |
 | --- | --- | --- |
@@ -466,7 +476,7 @@ Agents fail in ways a single model call doesn't: wrong tool, wrong parameters, l
 | **Response** | Correctness, faithfulness to tool outputs, helpfulness, harmfulness | LLM judge |
 | **Efficiency** | Tokens, cost, wall-clock per task | Usage metrics, traces |
 
-**Amazon Bedrock AgentCore Evaluations**
+#### Amazon Bedrock AgentCore Evaluations
 - Managed **LLM-as-a-judge** evaluation for agents. It integrates with **Strands** and **LangGraph** through **OpenTelemetry / OpenInference** instrumentation. Traces are converted to a **unified format** and scored.
 - Evaluators have ARNs. Built-in ones look like `arn:aws:bedrock-agentcore:::evaluator/Builtin.Helpfulness`. You can create **custom evaluators** (your own prompt and model), and access is controlled with **resource-based policies**. There are also third-party evaluators.
 - Evaluation modes: **on-demand** (score chosen sessions or traces), **online** (continuous sampling of live traffic), **batch**, **dataset** evaluation, and **simulation** (simulated users driving the agent).
@@ -481,17 +491,17 @@ Agents fail in ways a single model call doesn't: wrong tool, wrong parameters, l
 - Built-in evaluator configurations (their judge model and prompt) **can't be modified**. For different behaviour, create a custom evaluator.
 - The default quota is **1,000 evaluation configurations per Region**.
 
-**Bedrock Agents (classic) evaluation approach**
+#### Bedrock Agents (classic) evaluation approach
 - Turn on **`enableTrace`** in `InvokeAgent` to capture **pre-processing, orchestration (rationale, invocation input, observation), post-processing, guardrail and failure traces**. Score these traces with a judge, or check tool calls against expectations.
 - Build a **scenario test suite** of conversations with expected tool calls, parameters and final answers. Replay it against an **agent alias** (for example `test`) before moving the `prod` alias to the new version.
 - Use **return of control** or mocked action-group Lambdas in tests, so you check what the agent *would* call without side effects.
 - Evaluate the agent's final responses with a Bedrock LLM-as-a-judge job using **BYOI** (the logged final answers).
 
-**Strands / framework-level**
+#### Strands / framework-level
 - Strands has an evaluation SDK (Strands Evals; verify in docs) for test cases, trajectory assertions and judge-based scoring. The general pattern is to unit-test tools with mocks, integration-test agent trajectories, and judge final answers.
 - In multi-agent systems, also measure **routing accuracy** (did the supervisor or classifier pick the right sub-agent), **hand-off success** and **coordination overhead** (extra turns and tokens).
 
-**Reasoning quality in multi-step workflows**
+#### Reasoning quality in multi-step workflows
 - Judge the **plan** (is it sensible and minimal), each **step's rationale** (does it follow from the observations) and **self-correction** (does it recover after a tool error).
 - Detect **unsupported success claims**: the agent says "I've booked it" but no booking tool call succeeded. Compare the claim with the tool results in the trace.
 - Set **budgets** (max steps, tokens, time) and treat hitting the budget as a failure in evaluations. See the safeguards in [Task 2.1](../domain-2-implementation-integration/01-task-2.1-agentic-ai-tool-integrations.md).
@@ -502,7 +512,7 @@ Agents fail in ways a single model call doesn't: wrong tool, wrong parameters, l
 
 > Create comprehensive reporting systems to communicate performance metrics and insights effectively to stakeholders for FM implementations (for example, by using visualization tools, automated reporting mechanisms, model comparison visualizations).
 
-**Know your audiences**
+#### Know your audiences
 
 | Stakeholder | Wants | Format |
 | --- | --- | --- |
@@ -511,7 +521,7 @@ Agents fail in ways a single model call doesn't: wrong tool, wrong parameters, l
 | Risk / compliance | Safety metrics, guardrail interventions, audit trail, human review stats | Scheduled PDF/CSV, Audit Manager evidence, model cards |
 | Ops / SRE | Latency, errors, throttles, cost anomalies | CloudWatch dashboards + alarms |
 
-**Building the reporting pipeline**
+#### Building the reporting pipeline
 ```
 Bedrock eval job results (S3 JSONL)  ┐
 Golden-set CI results (S3)           ├─► Glue crawler → Data Catalog → Athena views ─► Amazon QuickSight
@@ -524,7 +534,7 @@ EventBridge Scheduler → Lambda: summarise week (Bedrock writes narrative) → 
 - **Bedrock console evaluation reports** show score histograms and explanations, and you can **compare evaluation jobs** side by side (verify in docs which job types support comparison).
 - Use an **LLM to generate the narrative** ("Faithfulness fell 4 points after KB sync on 3 Nov; the cause is outdated policy docs in category billing"), but base it on computed numbers and link to the data.
 
-**Model comparison visualisations**
+#### Model comparison visualisations
 - **Radar / spider chart**: one axis per quality dimension, one polygon per model.
 - **Scatter plot**: quality score vs cost per 1k requests, bubble size = p95 latency. This shows the **Pareto frontier**.
 - **Grouped bars**: metric by model × category, which exposes weak slices.
@@ -540,19 +550,7 @@ Always show the **dataset version, judge model, prompt version and date** on a r
 
 > Create deployment validation systems to maintain reliability during FM updates (for example, by using synthetic user workflows, AI-specific output validation for hallucination rates and semantic drift, automated quality checks to ensure response consistency).
 
-> [!IMPORTANT]
-> **🎯 Practice question 21 — sprint releases: pre-release gate + post-deploy monitoring + alarms + auto-rollback**
->
-> The CodePipeline pre-deploy stage → **Step Functions** workflow must include **all four** of these:
-> 1. **Bedrock model evaluations** (LLM-as-a-judge: faithfulness, correctness, coherence) **against the production baseline** → hallucination rate.
-> 2. **CloudWatch Synthetics canaries** → **replay synthetic user workflows** for the key intents.
-> 3. **Embedding-based consistency checks** against a **reference prompt set** → cosine similarity between new and baseline answers = **semantic drift**.
-> 4. **Automatic approve *or* rollback**, plus **scheduled post-deploy runs (e.g. nightly) with CloudWatch alarms** that trigger rollback.
-> - ❌ **Evals + canaries + auto-approve only:** no embedding consistency check (performance metrics ≠ semantic consistency).
-> - ❌ **Manual approval / weekly / no alarms:** not automated and not continuous.
-> - ❌ **Canaries + consistency only, no model evaluations:** no AI-specific hallucination evaluation.
-
-**Typical FM updates to validate**
+#### Typical FM updates to validate
 - moving to a new model version or generation
 - a provider's minor update
 - switching to Provisioned Throughput or a cross-Region inference profile
@@ -561,18 +559,18 @@ Always show the **dataset version, judge model, prompt version and date** on a r
 - KB re-index or embedding model change
 - agent instruction or tool change
 
-**Validation stages**
+#### Validation stages
 
 | Stage | What runs | Pass criteria |
 | --- | --- | --- |
-| Pre-deploy (CI) | Golden regression + judge metrics ([5.1.4](#skill-514--systematic-quality-assurance-processes)) | Thresholds vs baseline |
+| Pre-deploy (CI) | Golden regression + judge metrics ([5.1.4](#skill-514--systematic-quality-assurance-processes--pq37--pq66)) | Thresholds vs baseline |
 | Staging smoke | **Synthetic user workflows** end to end (UI → API → agent → tools → KB) | All journeys pass assertions |
 | Shadow (optional) | Mirror prod traffic to new version, compare outputs | Drift and judge scores within bounds |
 | Canary in prod | 1–10% traffic + **CloudWatch Synthetics canaries** + live metrics | No alarms during bake time |
 | Full rollout | Ramp up; continuous evaluation | KPIs stable |
 | Rollback | Automatic on alarm (AppConfig, CodeDeploy, Lambda alias) | Previous version restored |
 
-**Synthetic user workflows: CloudWatch Synthetics canaries**
+#### Synthetic user workflows: CloudWatch Synthetics canaries
 - Canaries are scripted, scheduled **Node.js or Python (Puppeteer/Selenium/Playwright)** tests that call your API or drive the UI. They publish `SuccessPercent` and `Duration` metrics, which you can alarm on.
 - For GenAI, add **semantic assertions** inside the canary: the response contains the expected fact, is valid JSON, includes a citation, or is semantically similar to the reference above a threshold (compute embedding similarity with a Bedrock embeddings call in the canary or a downstream Lambda).
 ```python
@@ -587,7 +585,7 @@ assert sim >= 0.80, f"semantic drift {sim:.2f}"
 ```
 - Run canaries **every few minutes** in each Region. Use a fixed set of **non-sensitive synthetic queries** and tag them so they're excluded from business metrics and feedback stats.
 
-**AI-specific output validation**
+#### AI-specific output validation
 
 | Check | Method | Signal |
 | --- | --- | --- |
@@ -603,47 +601,59 @@ assert sim >= 0.80, f"semantic drift {sim:.2f}"
 - Pin model **versions** explicitly (full model ID, not a floating alias) so an update is a **deliberate** change that passes through this validation.
 - **Rollback triggers**: CloudWatch alarms on the canary's `SuccessPercent`, error rate, guardrail intervention rate, negative feedback rate or a hallucination-rate custom metric. Wire them to **AppConfig deployment rollback**, **CodeDeploy** or a **Lambda alias** shift back. For SageMaker endpoints, use **deployment guardrails** (blue/green with canary or linear traffic shifting and **auto-rollback alarms**).
 
+> [!IMPORTANT]
+> **🎯 Practice question 21 — sprint releases: pre-release gate + post-deploy monitoring + alarms + auto-rollback**
+>
+> The CodePipeline pre-deploy stage → **Step Functions** workflow must include **all four** of these:
+> 1. **Bedrock model evaluations** (LLM-as-a-judge: faithfulness, correctness, coherence) **against the production baseline** → hallucination rate.
+> 2. **CloudWatch Synthetics canaries** → **replay synthetic user workflows** for the key intents.
+> 3. **Embedding-based consistency checks** against a **reference prompt set** → cosine similarity between new and baseline answers = **semantic drift**.
+> 4. **Automatic approve *or* rollback**, plus **scheduled post-deploy runs (e.g. nightly) with CloudWatch alarms** that trigger rollback.
+> - ❌ **Evals + canaries + auto-approve only:** no embedding consistency check (performance metrics ≠ semantic consistency).
+> - ❌ **Manual approval / weekly / no alarms:** not automated and not continuous.
+> - ❌ **Canaries + consistency only, no model evaluations:** no AI-specific hallucination evaluation.
+
 ---
 
 ## Exam triggers
 
 | Scenario cue | Answer |
 | --- | --- |
-| Need to compare FMs quickly on accuracy, robustness and toxicity with standard datasets | **Bedrock automatic (programmatic) evaluation job** with built-in datasets |
 | Evaluate summarisation quality against reference summaries | **ROUGE / BERTScore** (Bedrock summarisation task uses **BERTScore** on Gigaword) |
 | Evaluate translation output against references | **BLEU** |
 | Measure fluency of generated text | **Perplexity** (or judge/human fluency rating) |
+| Need to compare FMs quickly on accuracy, robustness and toxicity with standard datasets | **Bedrock automatic (programmatic) evaluation job** with built-in datasets |
 | Open-ended answers, no single correct answer, need scalable human-like scoring with explanations | **LLM-as-a-judge** model evaluation job |
 | Evaluate a SageMaker-hosted or third-party model using Bedrock evaluation | **Bring your own inference responses** (`modelResponses` in JSONL) |
 | Need brand-voice / domain-expert judgment on outputs | **Human-based evaluation job** with your own work team |
+| Pick a model balancing quality and cost | Cost-performance analysis: **cheapest model meeting quality thresholds**; quality vs $ Pareto |
+| Measure business impact of model B vs A | **A/B test** with sticky assignment + KPIs + feedback |
+| Release new model to 5% of traffic, auto-revert on errors | **Canary**: AppConfig deployment strategy / Lambda alias weights + **CloudWatch alarm rollback** |
+| Compare new model on real traffic without exposing users | **Shadow testing** (SageMaker shadow variants / mirrored requests) |
+| Collect thumbs up/down and link to prompts | **API Gateway → Lambda → DynamoDB**, join on **requestId** with invocation logs |
+| Route low-confidence answers to human reviewers | **Amazon A2I** human review loop (or Step Functions waitForTaskToken) |
+| Experts annotate hallucinated spans in responses | **SageMaker Ground Truth** custom labelling job, private workforce |
+| Detect regressions when prompt/model/KB changes | **Regression tests on a versioned golden dataset** |
+| Block deployment if eval scores drop | **Automated quality gate** in CodePipeline (CodeBuild eval step exits non-zero) |
 | Measure whether the RAG answer contains claims not in the retrieved context | **Faithfulness** metric (RAG retrieve-and-generate) |
 | Check retrieved chunks cover everything in the ground-truth answer | **Context coverage** (retrieve-only; needs ground truth) |
 | Check retrieved chunks are relevant to the question | **Context relevance** |
 | Answers are right but sources not properly cited | **Citation precision / citation coverage** metrics |
 | Compare several KB chunking/embedding configurations | **RAG evaluation jobs** on the same dataset, one per KB config |
 | Evaluate an external (non-Bedrock) RAG pipeline | RAG eval with **BYOI** retrieval/generation results |
-| Need ranking-quality metric with graded relevance labels | **nDCG@k** |
-| Is the first relevant chunk near the top? | **MRR** |
+| Judge seems to favour its own model's outputs | **Self-preference bias** → use judge from different family; calibrate with humans |
 | Did retrieval fetch all needed documents? | **Recall@k** |
+| Is the first relevant chunk near the top? | **MRR** |
+| Need ranking-quality metric with graded relevance labels | **nDCG@k** |
 | Measure agent success at end-to-end tasks | **Task / goal completion rate** (AgentCore **goal success rate** evaluator) |
 | Agent picks the wrong tool or passes bad arguments | **Tool selection accuracy** / **tool parameter accuracy** evaluators; trace analysis |
 | Continuously score live agent traffic with LLM-as-a-judge | **AgentCore Evaluations online evaluation** |
 | Capture Bedrock Agent reasoning steps for evaluation | **`enableTrace`** in InvokeAgent → orchestration traces |
-| Release new model to 5% of traffic, auto-revert on errors | **Canary**: AppConfig deployment strategy / Lambda alias weights + **CloudWatch alarm rollback** |
-| Compare new model on real traffic without exposing users | **Shadow testing** (SageMaker shadow variants / mirrored requests) |
-| Measure business impact of model B vs A | **A/B test** with sticky assignment + KPIs + feedback |
-| Pick a model balancing quality and cost | Cost-performance analysis: **cheapest model meeting quality thresholds**; quality vs $ Pareto |
-| Collect thumbs up/down and link to prompts | **API Gateway → Lambda → DynamoDB**, join on **requestId** with invocation logs |
-| Route low-confidence answers to human reviewers | **Amazon A2I** human review loop (or Step Functions waitForTaskToken) |
-| Experts annotate hallucinated spans in responses | **SageMaker Ground Truth** custom labelling job, private workforce |
-| Block deployment if eval scores drop | **Automated quality gate** in CodePipeline (CodeBuild eval step exits non-zero) |
-| Detect regressions when prompt/model/KB changes | **Regression tests on a versioned golden dataset** |
-| Detect that answers changed meaning after model upgrade | **Semantic drift**: embedding distance old vs new outputs; output diffing |
-| Same question gives inconsistent answers | **Response consistency check** (N runs → similarity variance); lower temperature |
-| Continuously verify the chatbot end-to-end every 5 min | **CloudWatch Synthetics canary** with semantic assertions |
 | Business stakeholders need scheduled dashboards of eval results | **QuickSight** (Athena over S3 results), scheduled email reports |
 | Visualise models on quality vs cost | **Scatter / Pareto chart**; radar chart per dimension |
-| Judge seems to favour its own model's outputs | **Self-preference bias** → use judge from different family; calibrate with humans |
+| Continuously verify the chatbot end-to-end every 5 min | **CloudWatch Synthetics canary** with semantic assertions |
+| Detect that answers changed meaning after model upgrade | **Semantic drift**: embedding distance old vs new outputs; output diffing |
+| Same question gives inconsistent answers | **Response consistency check** (N runs → similarity variance); lower temperature |
 
 ## Flashcards
 
@@ -653,6 +663,14 @@ assert sim >= 0.80, f"semantic drift {sim:.2f}"
 Outputs are open-ended and non-deterministic, with many valid answers. You need quality dimensions such as relevance, correctness, faithfulness, completeness, coherence, fluency and safety, scored by references, judges and humans.
 
 *D5 · Task 5.1 · GenAI vs ML evaluation*
+</details>
+
+<details>
+<summary><b>Q:</b> Which metric suits translation, which suits summarisation, and which suits fluency?</summary>
+
+BLEU for translation (precision-oriented), ROUGE for summarisation (recall-oriented) and perplexity for fluency.
+
+*D5 · Task 5.1 · Reference metrics*
 </details>
 
 <details>
@@ -677,14 +695,6 @@ Accuracy, robustness (the score delta under prompt perturbation) and toxicity.
 BERTScore, on the Gigaword dataset.
 
 *D5 · Task 5.1 · Built-in datasets*
-</details>
-
-<details>
-<summary><b>Q:</b> Which metric suits translation, which suits summarisation, and which suits fluency?</summary>
-
-BLEU for translation (precision-oriented), ROUGE for summarisation (recall-oriented) and perplexity for fluency.
-
-*D5 · Task 5.1 · Reference metrics*
 </details>
 
 <details>
@@ -717,78 +727,6 @@ Use bring your own inference responses: add `modelResponses: [{response, modelId
 The judge uses it as ground truth when scoring Correctness and Completeness. Both metrics also work without it.
 
 *D5 · Task 5.1 · Prompt dataset*
-</details>
-
-<details>
-<summary><b>Q:</b> Which RAG evaluation metric needs ground truth, and what does it measure?</summary>
-
-Context coverage, a retrieve-only metric. It measures how much of the ground-truth information the retrieved passages cover.
-
-*D5 · Task 5.1 · RAG eval*
-</details>
-
-<details>
-<summary><b>Q:</b> Context relevance is high but faithfulness is low. What's wrong?</summary>
-
-Retrieval is fine, but the generator ignores or goes beyond the context. Strengthen the grounding instructions, lower the temperature, add a Guardrails contextual grounding check, or try another model.
-
-*D5 · Task 5.1 · RAG diagnosis*
-</details>
-
-<details>
-<summary><b>Q:</b> Faithfulness is high but correctness is low. Where is the problem?</summary>
-
-In the knowledge base content. The model faithfully repeats wrong or outdated sources, so fix the data, the sync pipeline or the metadata filters.
-
-*D5 · Task 5.1 · RAG diagnosis*
-</details>
-
-<details>
-<summary><b>Q:</b> What's the difference between citation precision and citation coverage?</summary>
-
-Citation precision is the share of cited passages that were cited correctly. Citation coverage is how well the response is supported by its citations, and it penalises missing citations.
-
-*D5 · Task 5.1 · Citation metrics*
-</details>
-
-<details>
-<summary><b>Q:</b> MRR vs nDCG: when would you use each?</summary>
-
-MRR when you care about the rank of the first relevant result. nDCG when you have graded relevance labels and want to evaluate the whole ranking, for example to judge a reranker.
-
-*D5 · Task 5.1 · Retrieval metrics*
-</details>
-
-<details>
-<summary><b>Q:</b> Why do chunking and embedding experiments need separate knowledge bases?</summary>
-
-The parser, chunking strategy, embedding model and vector store are fixed once a KB is created, so each variant needs its own KB and index.
-
-*D5 · Task 5.1 · Retrieval experiments*
-</details>
-
-<details>
-<summary><b>Q:</b> Name the three evaluator levels in AgentCore Evaluations, with an example for each.</summary>
-
-Session level (goal success rate), trace level (correctness, faithfulness, helpfulness, harmfulness and others) and tool level (tool selection accuracy, tool parameter accuracy).
-
-*D5 · Task 5.1 · AgentCore Evaluations*
-</details>
-
-<details>
-<summary><b>Q:</b> What evaluation modes does AgentCore Evaluations support?</summary>
-
-On-demand, online (continuous sampling of live traces), batch, dataset evaluation and simulation. It consumes OpenTelemetry/OpenInference traces from Strands, LangGraph and other frameworks.
-
-*D5 · Task 5.1 · AgentCore Evaluations*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you check a Bedrock Agent's reasoning and tool use in tests?</summary>
-
-Set `enableTrace` on InvokeAgent and inspect the pre-processing, orchestration (rationale, invocation input, observation) and post-processing traces. Compare tool calls and parameters with expectations, and judge the rationale.
-
-*D5 · Task 5.1 · Bedrock Agents eval*
 </details>
 
 <details>
@@ -832,6 +770,94 @@ Add a CodeBuild stage that runs the golden dataset evaluation and exits non-zero
 </details>
 
 <details>
+<summary><b>Q:</b> Which RAG evaluation metric needs ground truth, and what does it measure?</summary>
+
+Context coverage, a retrieve-only metric. It measures how much of the ground-truth information the retrieved passages cover.
+
+*D5 · Task 5.1 · RAG eval*
+</details>
+
+<details>
+<summary><b>Q:</b> Context relevance is high but faithfulness is low. What's wrong?</summary>
+
+Retrieval is fine, but the generator ignores or goes beyond the context. Strengthen the grounding instructions, lower the temperature, add a Guardrails contextual grounding check, or try another model.
+
+*D5 · Task 5.1 · RAG diagnosis*
+</details>
+
+<details>
+<summary><b>Q:</b> Faithfulness is high but correctness is low. Where is the problem?</summary>
+
+In the knowledge base content. The model faithfully repeats wrong or outdated sources, so fix the data, the sync pipeline or the metadata filters.
+
+*D5 · Task 5.1 · RAG diagnosis*
+</details>
+
+<details>
+<summary><b>Q:</b> What's the difference between citation precision and citation coverage?</summary>
+
+Citation precision is the share of cited passages that were cited correctly. Citation coverage is how well the response is supported by its citations, and it penalises missing citations.
+
+*D5 · Task 5.1 · Citation metrics*
+</details>
+
+<details>
+<summary><b>Q:</b> Name three biases of LLM-as-a-judge and how to reduce them.</summary>
+
+Position bias, verbosity bias and self-preference. Randomise or swap the order of answers, use anchored rubrics, use a judge from a different model family, and calibrate against human labels.
+
+*D5 · Task 5.1 · Judge bias*
+</details>
+
+<details>
+<summary><b>Q:</b> MRR vs nDCG: when would you use each?</summary>
+
+MRR when you care about the rank of the first relevant result. nDCG when you have graded relevance labels and want to evaluate the whole ranking, for example to judge a reranker.
+
+*D5 · Task 5.1 · Retrieval metrics*
+</details>
+
+<details>
+<summary><b>Q:</b> Why do chunking and embedding experiments need separate knowledge bases?</summary>
+
+The parser, chunking strategy, embedding model and vector store are fixed once a KB is created, so each variant needs its own KB and index.
+
+*D5 · Task 5.1 · Retrieval experiments*
+</details>
+
+<details>
+<summary><b>Q:</b> Name the three evaluator levels in AgentCore Evaluations, with an example for each.</summary>
+
+Session level (goal success rate), trace level (correctness, faithfulness, helpfulness, harmfulness and others) and tool level (tool selection accuracy, tool parameter accuracy).
+
+*D5 · Task 5.1 · AgentCore Evaluations*
+</details>
+
+<details>
+<summary><b>Q:</b> What evaluation modes does AgentCore Evaluations support?</summary>
+
+On-demand, online (continuous sampling of live traces), batch, dataset evaluation and simulation. It consumes OpenTelemetry/OpenInference traces from Strands, LangGraph and other frameworks.
+
+*D5 · Task 5.1 · AgentCore Evaluations*
+</details>
+
+<details>
+<summary><b>Q:</b> How do you check a Bedrock Agent's reasoning and tool use in tests?</summary>
+
+Set `enableTrace` on InvokeAgent and inspect the pre-processing, orchestration (rationale, invocation input, observation) and post-processing traces. Compare tool calls and parameters with expectations, and judge the rationale.
+
+*D5 · Task 5.1 · Bedrock Agents eval*
+</details>
+
+<details>
+<summary><b>Q:</b> Which tool fits executive-facing, scheduled dashboards of model evaluation results?</summary>
+
+Amazon QuickSight over Athena (Glue Catalog on S3 results), with scheduled email reports. CloudWatch dashboards are for operational metrics.
+
+*D5 · Task 5.1 · Reporting*
+</details>
+
+<details>
 <summary><b>Q:</b> How do you detect semantic drift after a model upgrade?</summary>
 
 Run the same prompts through the old and new versions, embed the outputs and measure the cosine distance. Flag large distances for diffing or judge review. Also watch for shifts in the distribution of production answer embeddings over time.
@@ -845,22 +871,6 @@ Run the same prompts through the old and new versions, embed the outputs and mea
 Scheduled end-to-end synthetic user journeys with assertions (required facts, citations, JSON validity, semantic similarity). It publishes SuccessPercent and Duration metrics that can trigger alarms and rollback.
 
 *D5 · Task 5.1 · Synthetic monitoring*
-</details>
-
-<details>
-<summary><b>Q:</b> Name three biases of LLM-as-a-judge and how to reduce them.</summary>
-
-Position bias, verbosity bias and self-preference. Randomise or swap the order of answers, use anchored rubrics, use a judge from a different model family, and calibrate against human labels.
-
-*D5 · Task 5.1 · Judge bias*
-</details>
-
-<details>
-<summary><b>Q:</b> Which tool fits executive-facing, scheduled dashboards of model evaluation results?</summary>
-
-Amazon QuickSight over Athena (Glue Catalog on S3 results), with scheduled email reports. CloudWatch dashboards are for operational metrics.
-
-*D5 · Task 5.1 · Reporting*
 </details>
 
 ---

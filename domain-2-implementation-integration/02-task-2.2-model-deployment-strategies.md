@@ -12,48 +12,14 @@
 > **Related:** FM selection, Cross-Region Inference resilience and the customisation lifecycle (LoRA, Model Registry, rollback) are in [Task 1.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md). Runtime model routing is in [Task 2.4](04-task-2.4-fm-api-integrations.md). The high-level notes are in [02 · Foundation models, Bedrock APIs & inference](<../../study-notes/Certifications/AWS/AIP-C01 - Gen AI Pro/02-foundation-models-bedrock-apis-inference.md>).
 
 ## Key points
-- **Choosing the hosting option:**
-  - Managed serverless model with no infrastructure → **Bedrock on-demand**.
-  - Guaranteed capacity, or a custom or fine-tuned model → **Bedrock Provisioned Throughput** (model units, hourly or 1/6-month commitment).
-  - Large offline jobs → **Bedrock batch inference** (JSONL in S3, discounted).
-  - Your own weights, custom containers or full control of GPUs → **SageMaker AI endpoints**.
-- **Bedrock service tiers** are set per request with `service_tier`. There are four:
-  - **Reserved**: reserved TPM capacity, 1 or 3 months, overflows to Standard, targets 99.5% uptime.
-  - **Priority**: costs more than Standard, fastest responses, no reservation needed.
-  - **Standard** (`default`).
-  - **Flex**: discounted, for work that can wait.
-  - Priority, Standard and Flex share your on-demand quota. Reserved capacity is separate.
-- **Custom Model Import** brings Hugging Face-format weights (`.safetensors`, `config.json` and tokenizer files) from S3 into Bedrock, then you call it with **InvokeModel**.
-  - Supported architectures include Llama, Mistral/Mixtral, Qwen, Flan-T5, GPTBigCode and GPT-OSS.
-  - Size limits: under **200 GB** for text models and under **100 GB** for multimodal models, with context under **128K**.
-  - Not supported: **embedding models** and **batch inference**.
-- **SageMaker inference options:**
-
-  | Option | Best for | Key facts |
-  | --- | --- | --- |
-  | **Real-time** | Low latency, steady traffic | GPUs, streaming |
-  | **Serverless** | Idle gaps, tolerates cold starts | 1–6 GB memory, **no GPUs** |
-  | **Asynchronous** | Large or slow requests | Up to **1 GB** payload, up to **1 hour** processing, scales to **0**, results in S3, SNS notifications |
-  | **Batch Transform** | Offline datasets | Runs as a job, no persistent endpoint |
-
-- **Inference components** pack several models onto one endpoint. Each model gets its own GPU/CPU/memory allocation and scales independently. Use them for GPU utilisation and cost.
-- **Why LLMs are different:** what limits them is **GPU memory**, not CPU.
-  - Memory needed ≈ weights (**params × bytes per param**) + **KV cache** (grows with context length × batch size) + overhead.
-  - Example: 70B params in FP16 ≈ **140 GB** → **tensor parallelism** across several GPUs.
-- **LMI (DJL Serving) containers** run the inference engine for you: vLLM, TensorRT-LLM, LMI-Dist or Neuron.
-  - Configure with `OPTION_TENSOR_PARALLEL_DEGREE`, `OPTION_ROLLING_BATCH` (continuous batching) and `OPTION_QUANTIZE`.
-  - **TGI** is the Hugging Face alternative.
-- **Model loading:** large weights mean slow cold starts. Fix with pre-sharded weights, **SageMaker Fast Model Loader** (streams weights from S3 straight to the GPU), **container caching** and a warm minimum instance count.
-- **Accelerators:**
-  - **g5** (A10G 24 GB) and **g6** (L4 24 GB) for small and mid-size models.
-  - **g6e** (L40S 48 GB) for mid-size models.
-  - **p4d/p4de** (A100) and **p5** (H100) for large models.
-  - **inf2** (Inferentia2) gives the best cost per token for supported models served with the **Neuron SDK**. **trn1/trn2** are mainly for training.
-- **Optimisation levers:**
-  - Smaller, **task-specific** models (Nova Micro/Lite, Haiku-class), **distilled** models and **quantisation** (INT8/INT4/FP8).
-  - **Model cascading**: try a cheap model first, escalate to a bigger one only when needed.
-  - **Prompt caching**, **batching**, and **speculative decoding**.
-- **Lambda** fits **on-demand invocation** of Bedrock: it is stateless glue code calling a managed model. It cannot host LLMs itself (no GPU, max **10 GB** memory, **15 min** timeout).
+- **First decision: managed API or self-hosted?** Bedrock unless you need your own engine, container, GPU choice or a model Bedrock can't serve → SageMaker AI endpoints (2.2.1).
+- **Bedrock: pick the inference mode by traffic shape.** Spiky / unknown → **on-demand**; steady and must not throttle → **Provisioned Throughput** or the **Reserved tier**; can wait → **Flex** or **batch**; latency-critical without a reservation → **Priority** (2.2.1).
+- **Own open-weight model but want Bedrock's serverless API → Custom Model Import.** It doesn't take embedding models or batch jobs (2.2.1).
+- **SageMaker: pick the option by latency and payload.** Interactive → real-time; small CPU model with idle gaps → serverless (**no GPUs**); big payloads or slow jobs with scale-to-zero → async; offline datasets → Batch Transform (2.2.1).
+- **Lambda is glue, not a host** for FMs (2.2.1).
+- **LLMs are bound by GPU memory, not CPU:** weights + KV cache decide the instance and the tensor-parallel degree (2.2.2).
+- **Throughput comes from the serving engine** (LMI / vLLM / TGI continuous batching, quantisation) and **cold starts from model loading**; scale on concurrency, not CPU (2.2.2).
+- **Optimise by right-sizing first:** the smallest model that passes evaluation, then cascading, caching and the cheapest purchase option (2.2.3).
 
 ## Notes
 
@@ -89,7 +55,6 @@
 - You invoke it with the **provisioned model ARN** as `modelId`.
 - Historically, PT was **required to use fine-tuned (custom) Bedrock models**. Some customised models now support **on-demand** inference (verify in docs for each model).
 - **Batch inference is not supported for provisioned models.**
-- Exam cue: *"consistent high-volume production traffic, must not be throttled"* → PT (or the Reserved tier).
 
 **Service tiers** (verified from the Bedrock User Guide)
 
@@ -112,6 +77,10 @@
   "service_tier": "flex"
 }
 ```
+
+**Latency-optimised inference**
+- Some models offer a latency-optimised option (e.g. through supported cross-Region profiles) for lower TTFT, set per request with `performanceConfig: {"latency": "optimized"}`. Check which models support it (verify in docs).
+- → Full detail: [Task 4.2 · Skill 4.2.1](../domain-4-operational-efficiency-optimization/02-task-4.2-application-performance.md#skill-421--responsive-ai-systems-latency-vs-cost-trade-offs).
 
 **Batch inference**
 - Create the job with `CreateModelInvocationJob`. Input is **JSONL** in S3, with one `{"recordId": "...", "modelInput": {...}}` per line. Output is JSONL written to an S3 prefix.
@@ -144,16 +113,6 @@
 | **Asynchronous Inference** | Near real time (queued) | **1 GB** payload, **1 hour** processing | ✅ (scale instance count to 0) | ✅ | Long prompts or documents, slow generations, bursty queues |
 | **Batch Transform** | Offline | Whole datasets in S3 | No endpoint | ✅ | Scheduled bulk scoring or generation |
 
-> [!WARNING]
-> **🎯 Practice question 52 — real-time on-demand FMs + steady high-throughput batch + hybrid cloud/on-prem for residency (choose 2)**
->
-> - ✅ **SageMaker AI real-time endpoints** for low-latency, on-demand inference, **+ SageMaker Neo** to **compile and optimise models for edge and on-premises hardware** (the hybrid part). **Lambda** orchestrates calls across both.
-> - ✅ **Bedrock Provisioned Throughput** → **reserved, consistent capacity** for heavy batch workloads.
-> - ❌ **Bedrock on-demand "auto scaling":** elastic, but **no reserved capacity** and no on-premises option.
-> - ❌ **SageMaker *asynchronous* endpoints for low latency:** they queue requests, so they're for delayed responses.
-> - ❌ **SageMaker JumpStart:** a way to deploy models in the cloud, with no hybrid orchestration.
-> - ℹ️ **Neo** compiles a trained model for a target platform (cloud instance types or edge devices). Other ways to run on-premises: **Outposts** (see Task 2.3). SageMaker Edge Manager has been discontinued, so check current edge tooling in the docs (verify in docs).
-
 **Serverless Inference** facts (verified):
 - Memory options are 1024–6144 MB in 1 GB steps. vCPUs scale with the memory you choose.
 - Max concurrency is **200 per endpoint**, with **50 serverless endpoints per Region**. The account-wide concurrency pool is 1000 or 500 depending on the Region.
@@ -174,7 +133,18 @@
 - **Bidirectional streaming** uses `InvokeEndpointWithBidirectionalStream` over HTTP/2 on port 8443, through the experimental new Python SDK. A connection can stay open for up to **30 minutes**. It suits voice and real-time conversations.
 - The AWS CLI doesn't support streaming.
 
-**Multi-model and multi-container hosting**
+> [!WARNING]
+> **🎯 Practice question 52 — real-time on-demand FMs + steady high-throughput batch + hybrid cloud/on-prem for residency (choose 2)**
+>
+> - ✅ **SageMaker AI real-time endpoints** for low-latency, on-demand inference, **+ SageMaker Neo** to **compile and optimise models for edge and on-premises hardware** (the hybrid part). **Lambda** orchestrates calls across both.
+> - ✅ **Bedrock Provisioned Throughput** → **reserved, consistent capacity** for heavy batch workloads.
+> - ❌ **Bedrock on-demand "auto scaling":** elastic, but **no reserved capacity** and no on-premises option.
+> - ❌ **SageMaker *asynchronous* endpoints for low latency:** they queue requests, so they're for delayed responses.
+> - ❌ **SageMaker JumpStart:** a way to deploy models in the cloud, with no hybrid orchestration.
+> - ℹ️ **Neo** compiles a trained model for a target platform (cloud instance types or edge devices). Other ways to run on-premises: **Outposts** (see Task 2.3). SageMaker Edge Manager has been discontinued, so check current edge tooling in the docs (verify in docs).
+
+#### Multi-model, multi-container and inference components
+Once one model per endpoint wastes GPUs, these options share a fleet.
 
 | Feature | What it does | When |
 | --- | --- | --- |
@@ -331,13 +301,40 @@ Loading 100+ GB of weights dominates startup time. The fixes:
 - ⚠️ Gotcha: out-of-memory (OOM) under load, but not at startup → the **KV cache is growing**. Lower the maximum batch size or model length, quantise, or raise the TP degree.
 
 #### Autoscaling LLM endpoints
-- CPU utilisation is a **poor** signal for scaling LLMs. Better signals:
-  - **concurrent requests per model/copy** (`ConcurrentRequestsPerModel` or `ConcurrentRequestsPerCopy` high-resolution metrics, verify)
-  - `InvocationsPerInstance`
-  - GPU utilisation or GPU memory, published as custom metrics
-- Scaling out is slow (minutes), so use **step or scheduled scaling** before predictable peaks, and keep warm capacity.
-- Use **inference components** to scale models independently on a shared fleet.
+With loading under control, the last question is when to add or remove capacity. SageMaker real-time endpoints scale with **Application Auto Scaling**.
+- **Pick the right signal.** CPU utilisation is a **poor** signal for LLMs, and even invocations per instance is weak: one request may take 0.5 s or 30 s depending on output length, so **concurrency** reflects load better.
+
+  | Scope | Predefined target-tracking metrics |
+  | --- | --- |
+  | Endpoint variant | `SageMakerVariantInvocationsPerInstance`, **`SageMakerVariantConcurrentRequestsPerModelHighResolution`** |
+  | Inference component | `SageMakerInferenceComponentInvocationsPerCopy`, **`SageMakerInferenceComponentConcurrentRequestsPerCopyHighResolution`** |
+
+  - The **high-resolution concurrency** metrics enable **faster scale-out** on bursts (verify metric names in docs).
+  - **GPU utilisation / GPU memory** → publish as **custom CloudWatch metrics** and use target tracking or step scaling (they are not predefined).
+- **Policy types:**
+  - **target tracking** (the default choice)
+  - **step scaling** (aggressive reaction to big spikes)
+  - **scheduled scaling** (diurnal or business-hours traffic: pre-warm before 9 am, scale in at night)
+- **Cooldowns** (default 300 s for target tracking), and `DisableScaleIn` for scale-out-only policies.
+- **Scale out before demand.** Scaling out is slow (minutes, because of the container pull and weight loading), so use scheduled scaling before predictable peaks, a higher minimum capacity or one warm copy, and the loading fixes above.
+- **Inference components** scale model **copies** independently on a shared fleet and can scale idle models to zero copies (verify current support).
+- **Spiky or idle-heavy traffic:** SageMaker Serverless (CPU only, small models) or Async (scale to zero, queue-backed); Bedrock on-demand is the "no capacity management" default.
 - Deploy safely with blue/green, canary or linear **deployment guardrails** and auto-rollback on CloudWatch alarms. The lifecycle side is covered in Task 1.2.4.
+
+```bash
+aws application-autoscaling put-scaling-policy \
+  --service-namespace sagemaker \
+  --resource-id endpoint/llm-endpoint/variant/AllTraffic \
+  --scalable-dimension sagemaker:variant:DesiredInstanceCount \
+  --policy-name concurrency-tt --policy-type TargetTrackingScaling \
+  --target-tracking-scaling-policy-configuration '{
+    "TargetValue": 4,
+    "PredefinedMetricSpecification": {
+      "PredefinedMetricType": "SageMakerVariantConcurrentRequestsPerModelHighResolution"
+    },
+    "ScaleInCooldown": 600, "ScaleOutCooldown": 60
+  }'
+```
 
 ---
 
@@ -358,7 +355,7 @@ Loading 100+ GB of weights dominates startup time. The fixes:
 
 - **Task-specific small models** (e.g. a fine-tuned 8B classifier) are often more accurate *and* 10× cheaper than a general large model on narrow tasks.
 - **Distillation** (**Bedrock Model Distillation**) trains a smaller "student" model from a large "teacher" model's responses, giving teacher-like quality at student cost and latency. See Task 1.2 for the customisation mechanics.
-- **Latency-optimised inference** on Bedrock: some models offer a latency-optimised option (e.g. through supported cross-Region profiles) for lower TTFT. Check which models support it (verify in docs).
+- If the model is right but too slow, Bedrock **latency-optimised inference** (Skill 2.2.1) can lower TTFT.
 
 #### Model cascading (API-based)
 Send every request to the **cheapest capable model first** and **escalate** only when needed.
@@ -416,6 +413,7 @@ request ──► Tier 1: small model (Nova Micro / Haiku)
 | Steady high volume; must avoid throttling; guaranteed throughput | **Bedrock Provisioned Throughput** (model units) or the **Reserved tier** |
 | Mission-critical; reserved TPM for 1–3 months; overflow if exceeded | **Reserved tier** (overflows to Standard) |
 | Customer-facing; needs fastest responses; no capacity reservation | **Priority tier** (`service_tier: "priority"`) |
+| Check which tier actually served a request (Reserved overflow?) | CloudWatch **`ResolvedServiceTier`** dimension |
 | Evaluations or summaries that can wait; cut cost | **Flex tier** or **batch inference** |
 | Score millions of records overnight with an FM | **Bedrock batch inference** (JSONL in S3, `CreateModelInvocationJob`) |
 | Batch job with Converse format and `toolConfig` fails with 400 | Tool calling isn't supported with Converse batch; use the **InvokeModel** invocation type |
@@ -427,21 +425,20 @@ request ──► Tier 1: small model (Nova Micro / Haiku)
 | Large documents (hundreds of MB) or generations taking ~30 min; scale to zero | **SageMaker Asynchronous Inference** (1 GB, 1 hr, S3 + SNS) |
 | Several LLMs underusing GPUs on separate endpoints | **Inference components** on one shared endpoint |
 | Thousands of small per-tenant models with sparse traffic | **Multi-model endpoint** |
+| API Gateway times out on long LLM generations | Stream (WebSocket / Lambda URL), raise the integration timeout, or go **async** (SQS + callback) |
+| Run a fine-tuned proprietary model + general FM behind one API | **Hybrid**: Bedrock for general + SageMaker endpoint, behind a Lambda/API Gateway façade |
+| Guardrails for a model hosted on SageMaker | **`ApplyGuardrail` API** (model-independent) |
 | 70B model doesn't fit on one GPU | **Tensor parallelism** (`OPTION_TENSOR_PARALLEL_DEGREE`) on a multi-GPU instance (p4d/p5), or **quantise** |
+| Lowest cost per inference; supported architecture; can compile | **Inferentia2 (inf2)** + Neuron SDK |
+| Lowest cost for training or fine-tuning on AWS silicon | **Trainium (trn1/trn2)** |
 | Low GPU utilisation and throughput; requests wait for the batch | **Continuous (rolling) batching**: LMI with vLLM, or TGI |
 | OOM errors only under high concurrency or long prompts | **KV cache** growth → lower max batch or model length, quantise, raise TP |
 | Large model endpoint creation fails with a health-check timeout | Raise **container startup health-check** and **model download timeouts**; pre-shard; Fast Model Loader |
 | Slow scale-out because weights take minutes to load | **SageMaker Fast Model Loader** (stream S3 → GPU), container caching, keep warm minimum |
-| Lowest cost per inference; supported architecture; can compile | **Inferentia2 (inf2)** + Neuron SDK |
-| Lowest cost for training or fine-tuning on AWS silicon | **Trainium (trn1/trn2)** |
-| API Gateway times out on long LLM generations | Stream (WebSocket / Lambda URL), raise the integration timeout, or go **async** (SQS + callback) |
-| Run a fine-tuned proprietary model + general FM behind one API | **Hybrid**: Bedrock for general + SageMaker endpoint, behind a Lambda/API Gateway façade |
-| Guardrails for a model hosted on SageMaker | **`ApplyGuardrail` API** (model-independent) |
 | Most queries are routine; a few are complex; cut average cost | **Model cascading**: small model first, escalate when validation or confidence fails |
 | Large-model quality at small-model cost for one narrow task | **Bedrock Model Distillation** or fine-tuning a small model |
 | Same long system prompt or document in every request | **Prompt caching** |
 | Which instance type should a model use? Benchmark cost vs latency | **SageMaker Inference Recommender** |
-| Check which tier actually served a request (Reserved overflow?) | CloudWatch **`ResolvedServiceTier`** dimension |
 
 ## Flashcards
 
@@ -470,6 +467,14 @@ Priority, Standard and Flex share it. Reserved capacity is separate from the on-
 </details>
 
 <details>
+<summary><b>Q:</b> Bedrock batch inference: input format and key limitation with the Converse invocation type?</summary>
+
+JSONL in S3 with one `{"recordId", "modelInput"}` per line, started with `CreateModelInvocationJob`. With the Converse type, tool calling (`toolConfig`) isn't supported, so use the InvokeModel type. Batch also isn't supported for provisioned models.
+
+*D2 · Task 2.2 · Batch inference*
+</details>
+
+<details>
 <summary><b>Q:</b> What files and format does Bedrock Custom Model Import need?</summary>
 
 Hugging Face format in S3: `.safetensors` weights, `config.json`, `tokenizer_config.json`, `tokenizer.json` and `tokenizer.model`. Supported architectures include Llama, Mistral/Mixtral, Qwen, Flan-T5, GPTBigCode and GPT-OSS.
@@ -494,14 +499,6 @@ It has no GPUs and at most 6 GB of memory. A 7B model needs about 14 GB in FP16 
 </details>
 
 <details>
-<summary><b>Q:</b> What are the payload and time limits for SageMaker Asynchronous Inference?</summary>
-
-Payloads up to 1 GB and processing time up to 1 hour. Input and output go through S3, notifications can go to SNS, and the endpoint can autoscale to zero instances.
-
-*D2 · Task 2.2 · Async Inference*
-</details>
-
-<details>
 <summary><b>Q:</b> Which CloudWatch metric shows cold-start time for a SageMaker serverless endpoint, and how do you reduce it?</summary>
 
 `OverheadLatency`. Reduce it with **Provisioned Concurrency**, which can be autoscaled on a target metric or a schedule.
@@ -510,11 +507,35 @@ Payloads up to 1 GB and processing time up to 1 hour. Input and output go throug
 </details>
 
 <details>
+<summary><b>Q:</b> What are the payload and time limits for SageMaker Asynchronous Inference?</summary>
+
+Payloads up to 1 GB and processing time up to 1 hour. Input and output go through S3, notifications can go to SNS, and the endpoint can autoscale to zero instances.
+
+*D2 · Task 2.2 · Async Inference*
+</details>
+
+<details>
 <summary><b>Q:</b> What problem do SageMaker inference components solve?</summary>
 
 They pack several models onto one endpoint's instances. Each model gets its own accelerator, CPU and memory allocation, copy count and autoscaling, which improves GPU utilisation and cuts cost.
 
 *D2 · Task 2.2 · Inference components*
+</details>
+
+<details>
+<summary><b>Q:</b> What is Lambda's role in "on-demand invocation" of FMs, and what limits it?</summary>
+
+It's stateless glue code that calls Bedrock or a SageMaker endpoint (templates, validation, auth). It can't host LLMs: no GPU, 10 GB memory and a 15-minute timeout. Use streaming or async for long generations.
+
+*D2 · Task 2.2 · Lambda*
+</details>
+
+<details>
+<summary><b>Q:</b> How can a model hosted on SageMaker still use Bedrock Guardrails?</summary>
+
+Call the `ApplyGuardrail` API on the input and output text. It works without Bedrock model invocation.
+
+*D2 · Task 2.2 · Hybrid*
 </details>
 
 <details>
@@ -534,11 +555,11 @@ It stores the attention keys and values for every token in every active sequence
 </details>
 
 <details>
-<summary><b>Q:</b> What is continuous (rolling) batching?</summary>
+<summary><b>Q:</b> When do you choose Inferentia2 over NVIDIA GPUs?</summary>
 
-New requests join the running batch at each decode step instead of waiting for the whole batch to finish. This greatly raises GPU utilisation and tokens per second. In LMI it's `OPTION_ROLLING_BATCH` (vLLM, LMI-Dist, TensorRT-LLM); TGI also has it.
+When you want the lowest cost per inference, the model architecture is supported by the Neuron SDK, and you can accept the compilation step.
 
-*D2 · Task 2.2 · Continuous batching*
+*D2 · Task 2.2 · Accelerators*
 </details>
 
 <details>
@@ -547,6 +568,14 @@ New requests join the running batch at each decode step instead of waiting for t
 Tensor parallelism splits each layer's matrices across GPUs within a node (the usual choice for inference). Pipeline parallelism places groups of layers on different devices or nodes, which adds pipeline bubbles.
 
 *D2 · Task 2.2 · Parallelism*
+</details>
+
+<details>
+<summary><b>Q:</b> What is continuous (rolling) batching?</summary>
+
+New requests join the running batch at each decode step instead of waiting for the whole batch to finish. This greatly raises GPU utilisation and tokens per second. In LMI it's `OPTION_ROLLING_BATCH` (vLLM, LMI-Dist, TensorRT-LLM); TGI also has it.
+
+*D2 · Task 2.2 · Continuous batching*
 </details>
 
 <details>
@@ -569,30 +598,6 @@ Raise `ContainerStartupHealthCheckTimeoutInSeconds` and `ModelDataDownloadTimeou
 </details>
 
 <details>
-<summary><b>Q:</b> When do you choose Inferentia2 over NVIDIA GPUs?</summary>
-
-When you want the lowest cost per inference, the model architecture is supported by the Neuron SDK, and you can accept the compilation step.
-
-*D2 · Task 2.2 · Accelerators*
-</details>
-
-<details>
-<summary><b>Q:</b> Bedrock batch inference: input format and key limitation with the Converse invocation type?</summary>
-
-JSONL in S3 with one `{"recordId", "modelInput"}` per line, started with `CreateModelInvocationJob`. With the Converse type, tool calling (`toolConfig`) isn't supported, so use the InvokeModel type. Batch also isn't supported for provisioned models.
-
-*D2 · Task 2.2 · Batch inference*
-</details>
-
-<details>
-<summary><b>Q:</b> What is Lambda's role in "on-demand invocation" of FMs, and what limits it?</summary>
-
-It's stateless glue code that calls Bedrock or a SageMaker endpoint (templates, validation, auth). It can't host LLMs: no GPU, 10 GB memory and a 15-minute timeout. Use streaming or async for long generations.
-
-*D2 · Task 2.2 · Lambda*
-</details>
-
-<details>
 <summary><b>Q:</b> Model cascading vs model routing?</summary>
 
 Cascading tries the cheapest model first and escalates in sequence when validation or confidence fails. Routing picks one model up front from a classification, as Bedrock Intelligent Prompt Routing or Step Functions content-based routing does.
@@ -606,14 +611,6 @@ Cascading tries the cheapest model first and escalates in sequence when validati
 When the escalation rate is high. Many requests then pay for multiple model calls. Route directly or improve the small model (fine-tune or distil) instead.
 
 *D2 · Task 2.2 · Cascading*
-</details>
-
-<details>
-<summary><b>Q:</b> How can a model hosted on SageMaker still use Bedrock Guardrails?</summary>
-
-Call the `ApplyGuardrail` API on the input and output text. It works without Bedrock model invocation.
-
-*D2 · Task 2.2 · Hybrid*
 </details>
 
 <details>

@@ -8,20 +8,15 @@
 > - Skill 3.4.3 · Develop policy-compliant AI systems to ensure adherence to responsible AI practices
 
 ## Key points
-- **AWS responsible AI dimensions (8):** **fairness**, **explainability**, **privacy & security**, **safety**, **controllability**, **veracity & robustness**, **governance**, **transparency**. Each exam scenario usually points at one or two of them. "Users don't trust answers" → transparency/explainability. "Treats groups differently" → fairness. "Must follow company policy" → governance/controllability.
-- **Transparency = show your working.** Show **reasoning** (extended thinking / `reasoningContent`, agent `rationale`), **evidence** (KB **citations** with S3 URIs), and **uncertainty** (confidence scores published to **CloudWatch**). Disclose that the content is AI-generated.
-- **Bedrock Agents trace:** set `enableTrace=True` on `InvokeAgent`. Trace types: **PreProcessing** (`isValid` + `rationale`), **Orchestration** (`rationale` → `invocationInput` → `observation`), **PostProcessing**, **RoutingClassifier**, **CustomOrchestration**, **Guardrail** (`GUARDRAIL_INTERVENED`/`NONE`), **Failure** (`failureReason`). Use the trace for **developer debugging/audit**. Show users a **curated summary** of it, never the raw trace.
-- **Citations:** `RetrieveAndGenerate` returns `citations[]` → `generatedResponsePart` (text span) + `retrievedReferences[]` (content + `location.s3Location.uri` + metadata). Render the citations as clickable sources and you have **evidence presentation**.
-- **Confidence/uncertainty** has no single built-in FM metric. Build it from proxies: **retrieval scores**, guardrail **contextual grounding** and **relevance** scores, **LLM-as-a-judge** scores, self-consistency (agreement across N samples), and model-reported confidence. Publish with `PutMetricData` or **EMF**, then alarm on low values and route to a human.
-- **Bedrock model evaluation, three modes:**
-  - **automatic** (programmatic): built-in datasets, **100 prompts** each; custom datasets up to **1,000 prompts**.
-  - **human** (your own team or an AWS-managed team; the output bucket needs **CORS**).
-  - **LLM-as-a-judge**: a generator model plus an evaluator model, both in the **same Region**.
-- **Fairness datasets:** **BOLD** = bias in open-ended generation across 5 domains (profession, gender, race, religious ideologies, political ideologies). **RealToxicityPrompts** = toxicity. Responsible AI judge metrics: **`Builtin.Harmfulness`**, **`Builtin.Stereotyping`**, **`Builtin.Refusal`**.
-- **Systematic A/B testing:** keep **Prompt Management** versions or variants of the same prompt. Run them **side by side** (Flows or app-level traffic split), score them with an evaluation job or judge, and compare **per-group** metrics in CloudWatch. Use the optional dataset `category` key to slice results by demographic.
-- **SageMaker Clarify:** **pre-training bias** (CI, DPL, KL, JS, LP, TVD, KS, CDD) + post-training bias + SHAP explainability + **FMEval** for FMs. ⚠️ AWS docs now say Clarify is **closed to new customers** (existing customers keep it). The exam guide may still reference it.
-- **Policy-compliant systems:** map each written policy clause to a **guardrail policy** (denied topics, content filters, word filters, PII, contextual grounding, Automated Reasoning). Document limits and intended use in **model cards** (see [Task 3.3](03-task-3.3-governance-compliance.md)) and **AWS AI Service Cards**. Run **Lambda compliance checks** (pre-deploy gate + post-response audit) and send violations to EventBridge/SNS.
-- **Human-in-the-loop** is the go-to answer for **high-stakes, low-confidence** decisions (credit, hiring, medical). Use Step Functions `waitForTaskToken` or **Amazon A2I**.
+- **Frame every question by responsible AI dimension** (fairness, explainability, privacy & security, safety, controllability, veracity & robustness, governance, transparency). "Users don't trust answers" → transparency/explainability · "treats groups differently" → fairness · "must follow company policy" → governance/controllability.
+- **Transparency = show your working:** reasoning (extended thinking, agent `rationale`), evidence (KB **citations**), uncertainty (confidence proxies → **CloudWatch**), and disclosure that content is AI-generated → 3.4.1.
+- 🎯 **PQ43** **Bedrock Agents trace (`enableTrace=True`)** is for developers and auditors: pick the trace type by question (why rejected → PreProcessing, why this tool → Orchestration, wrong sub-agent → RoutingClassifier, why blocked → Guardrail). Users get a **curated summary**, never the raw trace → 3.4.1.
+- **No single confidence number exists:** build it from retrieval, grounding, judge and self-consistency scores; publish with `PutMetricData` or **EMF**, alarm, and route low confidence to a human → 3.4.1.
+- **Fairness testing:** counterfactual prompts + **BOLD** / **RealToxicityPrompts** benchmarks + LLM-as-a-judge **`Builtin.Stereotyping` / `Harmfulness` / `Refusal`**, sliced per group with the dataset **`category`** key → 3.4.2.
+- **Prove a bias fix with A/B tests:** Prompt Management versions/variants run side by side in Flows, scored offline and online, compared per segment in CloudWatch → 3.4.2.
+- **Clarify** for tabular bias metrics and bias drift; **Bedrock evaluations** for new FM fairness work (Clarify is closed to new customers) → 3.4.2.
+- **Policy-compliant systems:** map each policy clause to a **guardrail policy**, document limits in **model cards** (home: Task 3.3) and AI Service Cards, and run **Lambda compliance checks** before deployment and after each response → 3.4.3.
+- **Human-in-the-loop** is the answer for **high-stakes, low-confidence** decisions (credit, hiring, medical): Step Functions `waitForTaskToken` or **A2I**.
 
 ## Notes
 
@@ -41,7 +36,7 @@
 - **Responsible AI lifecycle:** define the use case and stakeholders → assess risks (likelihood × severity per dimension) → choose mitigations → **evaluate before release** → **monitor after release** → feed back. The exam likes "**continuous**" more than "one-off".
 - **AWS AI Service Cards** = AWS-published transparency documents for AWS AI services and Amazon models, e.g. Amazon Nova and Titan models, Rekognition, Textract, Transcribe. They cover intended use cases, limitations, design choices, and deployment/performance best practices. **Model cards** (SageMaker) are what *you* write for *your* models.
 - Third-party model providers (Anthropic, Meta, etc.) publish their own model cards or system cards. Read them for **known limitations** before choosing a model (links to [Task 1.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md)).
-- Standards you may see named: **ISO/IEC 42001** (AI management system; AWS is certified), the **NIST AI RMF**, and the **EU AI Act** (risk tiers; high-risk systems need transparency, human oversight and logging).
+- Standards you may see named: **ISO/IEC 42001** (AI management system; AWS is certified), the **NIST AI RMF**, and the **EU AI Act** (risk tiers; high-risk systems need transparency, human oversight and logging). → Full detail: [Task 3.3 · Skill 3.3.1](03-task-3.3-governance-compliance.md#skill-331--compliance-frameworks-for-fm-deployments).
 
 ---
 
@@ -101,7 +96,7 @@
 - **`Retrieve`** (you generate the answer yourself): ask the model to cite chunk IDs (`[doc-3]`) and map them back. Validate in post-processing that **every cited ID exists** in the retrieved set. Hallucinated citations are a classic failure mode.
 - **Agents:** the `knowledgeBaseLookupOutput.retrievedReferences` in the orchestration trace observation, plus the `citations` in the `InvokeAgent` response chunk attribution, give the same evidence for agent answers.
 - **Metadata you need for good attribution:** `title`, `source_url`, `page`, `last_updated`, `owner`. Add these at ingestion (sidecar `.metadata.json`; see [Task 1.4](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md)).
-- **Grounding check as transparency:** the guardrail **contextual grounding check** gives a **grounding** score (is the answer supported by the source?) and a **relevance** score (does it answer the query?). Block or flag answers below threshold. The scores can also be shown as a confidence indicator.
+- **Grounding check as transparency:** the guardrail **contextual grounding check** scores **grounding** (supported by the source?) and **relevance** (answers the query?). Besides blocking or flagging, the scores can be shown as a confidence indicator. → Full detail: [Task 3.1 · Skill 3.1.3](01-task-3.1-input-output-safety-controls.md#skill-313--accuracy-verification-systems-to-reduce-hallucinations).
 
 #### 4. Bedrock Agents tracing
 
@@ -127,6 +122,13 @@
 | **GuardrailTrace** | `action: GUARDRAIL_INTERVENED \| NONE` + input/output assessments (topic, content filter with confidence, words, PII, regex) | Explaining **why** content was blocked |
 | **FailureTrace** | `failureReason` | Errors (Lambda failure, parsing failure) |
 
+- Every trace except Failure includes `modelInvocationInput`: the prompt text, `type`, `inferenceConfiguration`, `promptCreationMode`/`parserMode` (`DEFAULT` vs `OVERRIDDEN`) and `overrideLambda`. This is how you see **what the model actually saw**, and whether advanced prompt templates are in use.
+- `modelInvocationOutput.metadata.usage` gives **input/output tokens per step**, which feeds cost transparency.
+- **`callerChain`** shows the path from the end user through the supervisor to the collaborator, which gives accountability in multi-agent systems.
+- **Persist traces:** stream them to CloudWatch Logs or Firehose → S3 → Athena for audit. Use invocation logging for raw model I/O (see [Task 2.5](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md)).
+- **AgentCore / Strands equivalent:** OpenTelemetry traces and spans → **CloudWatch GenAI observability** / X-Ray. Use these for Strands agents and agents hosted on AgentCore Runtime.
+- ⚠️ Raw traces can contain **PII, tool outputs and internal prompts**. Don't stream them to end users. Redact before logging where policy requires it.
+
 > [!IMPORTANT]
 > **🎯 Practice question 43 — 8% of multi-agent handoffs fail with HTTP 200: find where validation breaks, validate consistently**
 >
@@ -135,13 +137,6 @@
 > - ❌ **Logs Insights + Lambda normalisers:** looks at logs after the fact and doesn't capture model invocation inputs and outputs.
 > - ❌ **EventBridge + Step Functions validation layer:** a re-architecture, and it still doesn't pinpoint the failure.
 > - ❌ **Correlation IDs + pre-validation Lambda:** tracks requests but doesn't diagnose the FM-to-FM parameter issues.
-
-- Every trace except Failure includes `modelInvocationInput`: the prompt text, `type`, `inferenceConfiguration`, `promptCreationMode`/`parserMode` (`DEFAULT` vs `OVERRIDDEN`) and `overrideLambda`. This is how you see **what the model actually saw**, and whether advanced prompt templates are in use.
-- `modelInvocationOutput.metadata.usage` gives **input/output tokens per step**, which feeds cost transparency.
-- **`callerChain`** shows the path from the end user through the supervisor to the collaborator, which gives accountability in multi-agent systems.
-- **Persist traces:** stream them to CloudWatch Logs or Firehose → S3 → Athena for audit. Use invocation logging for raw model I/O (see [Task 2.5](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md)).
-- **AgentCore / Strands equivalent:** OpenTelemetry traces and spans → **CloudWatch GenAI observability** / X-Ray. Use these for Strands agents and agents hosted on AgentCore Runtime.
-- ⚠️ Raw traces can contain **PII, tool outputs and internal prompts**. Don't stream them to end users. Redact before logging where policy requires it.
 
 #### 5. Confidence metrics and uncertainty in CloudWatch
 
@@ -210,51 +205,28 @@
 | **Production monitoring** | Per-group metrics in CloudWatch (refusal rate, sentiment, length, escalations by segment) | Bias **drift** after launch |
 | **Classic ML bias metrics** | SageMaker Clarify (DPL, DI, etc.) on FM-driven decisions turned into labels | Allocational decisions (approve/deny) |
 
-#### 3. Amazon Bedrock model evaluation: the three job types
+#### 3. Amazon Bedrock model evaluation for fairness
 
-| Job type | Scorer | Datasets | Notes |
-| --- | --- | --- | --- |
-| **Automatic (programmatic)** | Algorithmic metrics: **accuracy**, **robustness**, **toxicity** | Built-in (each **down-sampled to 100 prompts**) or custom JSONL **≤ 1,000 prompts** | Task types: general text generation, summarisation, Q&A, classification |
-| **Human** | Your workforce (**bring your own team**) or an **AWS-managed team** | Custom prompts | Output S3 bucket needs **CORS**; rating methods like thumbs up/down, Likert, ordinal ranking |
-| **LLM-as-a-judge** | Evaluator FM scores the generator's responses + gives an **explanation** per prompt | Custom JSONL; can **bring your own responses** from non-Bedrock models (skips inference) | Generator & evaluator in **same Region**; CRIS profiles supported; built-in **and custom** metrics |
+Bedrock evaluations are explained in full in Domain 5 (job types, built-in datasets, judge metrics, RAG evaluation). → Full detail: [Task 5.1 · Skill 5.1.2](../domain-5-testing-validation-troubleshooting/01-task-5.1-evaluation-systems.md#skill-512--systematic-model-evaluation-to-find-optimal-configurations) and [Skill 5.1.5](../domain-5-testing-validation-troubleshooting/01-task-5.1-evaluation-systems.md#skill-515--multi-perspective-assessment-rag-eval-llm-as-a-judge-human-feedback). The fairness angle:
 
-- **Built-in datasets for automatic evaluation** (verified):
+| Job type | Fairness use | Facts to remember here |
+| --- | --- | --- |
+| **Automatic (programmatic)** | Benchmark candidate models on toxicity (and robustness) | Built-in datasets each **down-sampled to 100 prompts**; custom JSONL **≤ 1,000 prompts** |
+| **Human** | Nuanced, cultural judgement by diverse reviewers | Your own team or an **AWS-managed team**; output S3 bucket needs **CORS** |
+| **LLM-as-a-judge** | Score your own prompts for stereotyping at scale | Generator & evaluator in the **same Region**; can **bring your own responses** from non-Bedrock models |
 
-| Task type | Accuracy | Robustness | Toxicity |
-| --- | --- | --- | --- |
-| General text generation | **TREX** → real-world knowledge (RWK) score | **BOLD**, TREX, WikiText2 → word error rate | **RealToxicityPrompts**, **BOLD** → toxicity |
-| Text summarisation | **Gigaword** → BERTScore | Gigaword → BERTScore & deltaBERTScore | Gigaword → toxicity |
-| Question & answer | **BoolQ**, NaturalQuestions, TriviaQA → NLP-F1 | Same → F1 & deltaF1 | Same → toxicity |
-| Text classification | **Women's E-Commerce Clothing Reviews** → accuracy | Same → delta classification accuracy | — |
-
-  - **BOLD** covers **5 fairness domains**: profession, gender, race, religious ideologies, political ideologies.
-  - **Robustness** = how much the output changes under small input perturbations (typos, case changes). The "delta" metrics measure that change.
+- **Fairness datasets:** **BOLD** (bias in open-ended generation) covers **5 fairness domains**: profession, gender, race, religious ideologies, political ideologies. **RealToxicityPrompts** (with BOLD) gives the toxicity score for general text generation.
 - **Custom dataset JSONL** (automatic):
   ```json
   {"prompt": "Describe a typical nurse.", "referenceResponse": "...", "category": "gender-profession"}
   ```
   - `prompt` is required. `referenceResponse` is required for accuracy/robustness and for Q&A. **`category` is optional and gives per-category scores, which is your built-in slicing for fairness**, e.g. one category per demographic counterfactual set.
 
-#### 4. LLM-as-a-judge metrics (verified built-ins)
+#### 4. LLM-as-a-judge for fairness
 
-| Group | Metric (API name) | Measures |
-| --- | --- | --- |
-| Quality | `Builtin.Correctness` | Is the response correct (uses reference if provided) |
-| Quality | `Builtin.Completeness` | Answers every part of the prompt |
-| Quality | `Builtin.Faithfulness` | No info beyond the provided context (hallucination proxy) |
-| Quality | `Builtin.Helpfulness` | Follows instructions, coherent, anticipates needs |
-| Quality | `Builtin.Coherence` | Logical gaps / contradictions |
-| Quality | `Builtin.Relevance` | Relevant to the prompt |
-| Quality | `Builtin.FollowingInstructions` | Respects exact directions |
-| Quality | `Builtin.ProfessionalStyleAndTone` | Appropriate for professional setting |
-| **Responsible AI** | **`Builtin.Harmfulness`** | Harmful content |
-| **Responsible AI** | **`Builtin.Stereotyping`** | Stereotypes of any kind, **positive or negative** |
-| **Responsible AI** | **`Builtin.Refusal`** | Declines / rejects the request |
-
+- **Responsible AI built-in metrics:** **`Builtin.Harmfulness`** (harmful content), **`Builtin.Stereotyping`** (stereotypes of any kind, **positive or negative**), **`Builtin.Refusal`** (declines / rejects the request). They sit alongside the quality metrics (Correctness, Completeness, Faithfulness, Helpfulness, Coherence, Relevance, FollowingInstructions, ProfessionalStyleAndTone), so one job can show a bias fix didn't hurt quality.
 - **Custom metrics:** write your own judge prompt and rating scale, e.g. "Does the response treat the applicant's nationality as relevant? 0/1". Custom metrics use a **subset of evaluator models**.
-- **Evaluator models** include Amazon Nova (Pro, Premier, Micro, 2 Lite), Anthropic Claude (3.x, 4.x), Llama 3.1 70B and Mistral Large. The list changes often, so verify in docs.
-- **Results:** the console shows a histogram per metric plus explanations for the **first 5 prompts**. The full report goes to **S3**.
-- **Judge bias:** judges have their own biases (position bias, verbosity bias, self-preference). Mitigations: use a judge from a **different model family** than the generator, calibrate against a **human-labelled** sample, and randomise order in pairwise comparisons.
+- **Judge bias** (position, verbosity, self-preference) can itself skew fairness scores: use a judge from a **different model family**, calibrate against a **human-labelled** sample, and randomise order in pairwise comparisons.
 - **IAM:** the evaluation service role needs access to **both the generator and evaluator models** + the S3 input/output buckets.
 - Job creation sketch:
   ```python
@@ -275,7 +247,7 @@
   )
   ```
   (Shape is indicative, so verify in docs for exact field names.)
-- **RAG evaluation** (Knowledge Base evaluation jobs) uses the same judge mechanism. **Retrieve-only** jobs score context relevance/coverage. **Retrieve-and-generate** jobs add quality metrics, citation metrics and the same **responsible AI metrics** (harmfulness, stereotyping, refusal). Deeper coverage is in Domain 5.
+- **RAG evaluation** (retrieve-and-generate jobs) reports the same **responsible AI metrics** (harmfulness, stereotyping, refusal), so you can test a RAG app for bias too (→ Skill 5.1.5).
 
 #### 5. Systematic A/B testing with Prompt Management and Flows
 
@@ -336,14 +308,12 @@
 
 #### 2. Model cards: documenting FM limitations
 
-- **SageMaker Model Cards** (mechanics, schema, export and Model Registry linkage are in [Task 3.3](03-task-3.3-governance-compliance.md)). For responsible AI, focus on the content:
-  - **Intended uses** and **out-of-scope uses** ("not for medical diagnosis")
-  - **Known limitations** (languages, knowledge cutoff, hallucination rates on eval set, weaker performance on dialects)
-  - **Evaluation results**, including **fairness** (per-category scores from Bedrock eval / Clarify), toxicity and robustness
-  - **Risk rating** (low/medium/high/unknown) and **mitigations** (guardrail IDs, HITL steps)
-  - **Ethical considerations**, training data provenance, and **owners/approvers**
-- For Bedrock FMs you don't train, write a model card for **your application/system** (FM + prompt + KB + guardrail versions). Link to the provider's model card and the **AWS AI Service Card**.
-- **Lifecycle:** model card status (Draft → PendingReview → Approved → Archived). Gate deployment on an **Approved** card in CI/CD (see [Task 2.3](../domain-2-implementation-integration/03-task-2.3-enterprise-integration-architectures.md) Skill 2.3.5).
+Model card mechanics (schema, versioning, status lifecycle, PDF export, Model Registry linkage, programmatic creation) → Full detail: [Task 3.3 · Skill 3.3.1](03-task-3.3-governance-compliance.md#skill-331--compliance-frameworks-for-fm-deployments). For responsible AI, focus on the **content**:
+- **Intended uses** and **out-of-scope uses** ("not for medical diagnosis"), and **known limitations** (languages, knowledge cutoff, hallucination rates on eval set, weaker performance on dialects).
+- **Evaluation results**, including **fairness** (per-category scores from Bedrock eval / Clarify), toxicity and robustness.
+- **Risk rating** with **mitigations** (guardrail IDs, HITL steps), **ethical considerations**, training data provenance, and **owners/approvers**.
+- For Bedrock FMs you don't train, write the card for **your application/system** (FM + prompt + KB + guardrail versions), and link the provider's model card and the **AWS AI Service Card**.
+- Gate deployment on an **Approved** card in CI/CD (see [Task 2.3](../domain-2-implementation-integration/03-task-2.3-enterprise-integration-architectures.md) Skill 2.3.5).
 
 #### 3. Automated compliance checks with Lambda
 
@@ -422,6 +392,7 @@
 | Need nuanced cultural judgement of outputs | Bedrock **human evaluation** (own team or AWS-managed) |
 | Per-group scores from one evaluation job | Use the dataset **`category`** key |
 | Evaluate a non-Bedrock model's outputs with a Bedrock judge | LLM-as-a-judge with **bring your own inference responses** |
+| LLM judge seems to favour its own outputs | Use a **different model family** as judge + calibrate with human labels |
 | Prove a revised system prompt reduces bias without hurting quality | **Prompt Management versions/variants + Flows** A/B test + evaluation job + per-variant CloudWatch metrics |
 | Model refuses requests from one dialect/group more often | Monitor **RefusalRate by segment**; `Builtin.Refusal` eval; fix prompt / examples |
 | Bias metrics on tabular training data before training | **SageMaker Clarify pre-training metrics** (CI, DPL…) |
@@ -434,7 +405,6 @@
 | Ensure all apps use the mandated guardrail | IAM **`bedrock:GuardrailIdentifier` condition** / org-level enforced guardrail |
 | Compliance violations must alert security and create audit evidence | Lambda check → **EventBridge → SNS/Security Hub**; evidence to S3 + **Audit Manager** |
 | High-stakes decision with low confidence | **Human-in-the-loop** (Step Functions `waitForTaskToken` / **A2I**) |
-| LLM judge seems to favour its own outputs | Use a **different model family** as judge + calibrate with human labels |
 
 ## Flashcards
 
@@ -476,6 +446,14 @@ PreProcessingTrace. Its `parsedResponse` has `isValid` and `rationale`.
 `callerChain`, the list of agent alias ARNs between the end user and the agent that published the trace. `collaboratorName` identifies the collaborator.
 
 *D3 · Task 3.4 · Multi-agent tracing*
+</details>
+
+<details>
+<summary><b>Q:</b> Why show users a curated reasoning summary instead of the raw agent trace?</summary>
+
+Raw traces can include internal prompts, tool outputs and PII, and they are noisy. Users need short, faithful explanations plus evidence. Full traces go to secured logs for devs and auditors.
+
+*D3 · Task 3.4 · Transparency*
 </details>
 
 <details>
@@ -551,6 +529,14 @@ Yes. Put your own inference responses in the prompt dataset. Bedrock skips infer
 </details>
 
 <details>
+<summary><b>Q:</b> Name two judge-model biases and their mitigations.</summary>
+
+Self-preference: use a judge from a different model family. Position or verbosity bias: randomise order and calibrate against human-labelled samples.
+
+*D3 · Task 3.4 · LLM-as-a-judge*
+</details>
+
+<details>
 <summary><b>Q:</b> Which evaluation type needs CORS on the S3 output bucket?</summary>
 
 Human evaluation jobs. Automatic and LLM-as-a-judge jobs don't.
@@ -612,22 +598,6 @@ Automated Reasoning checks. They validate responses against a formal logic polic
 Required disclaimers, no PII or banned terms, schema conformance, citations present and acceptable tone. Violations are remediated (redact/regenerate/fallback) and emitted to EventBridge with a CloudWatch metric.
 
 *D3 · Task 3.4 · Compliance checks*
-</details>
-
-<details>
-<summary><b>Q:</b> Name two judge-model biases and their mitigations.</summary>
-
-Self-preference: use a judge from a different model family. Position or verbosity bias: randomise order and calibrate against human-labelled samples.
-
-*D3 · Task 3.4 · LLM-as-a-judge*
-</details>
-
-<details>
-<summary><b>Q:</b> Why show users a curated reasoning summary instead of the raw agent trace?</summary>
-
-Raw traces can include internal prompts, tool outputs and PII, and they are noisy. Users need short, faithful explanations plus evidence. Full traces go to secured logs for devs and auditors.
-
-*D3 · Task 3.4 · Transparency*
 </details>
 
 ---

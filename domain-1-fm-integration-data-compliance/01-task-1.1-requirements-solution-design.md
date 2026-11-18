@@ -9,18 +9,16 @@
 > - **Skill 1.1.3** Create standardized technical components to ensure consistent implementation across multiple deployment scenarios (for example, by using the AWS Well-Architected Framework, AWS WA Tool Generative AI Lens).
 
 ## Key points
-- **Requirements first, model second.** Turn the business goal into measurable **functional** requirements (task, modality, languages, output format) and **non-functional** ones (latency SLO, throughput/TPM, cost per request, data residency, compliance, availability). Then pick the model, the integration pattern and the deployment option.
-- **Customisation ladder** (cheapest/fastest first): **prompt engineering → RAG → agents/tool use → fine-tuning / distillation → continued pre-training → train from scratch**. Need fresh or private facts → **RAG**. Need a style, format or domain *behaviour* → **fine-tune**. Need a smaller, cheaper model that keeps a big model's quality → **distillation**.
-- **Deployment options:** **Bedrock on-demand** (serverless, pay per token) · **Bedrock batch** (async S3 JSONL jobs, cheaper, for work nobody is waiting on) · **Provisioned Throughput** (reserved model units; needed for most custom models) · **cross-Region inference profiles** (more burst capacity) · **Custom Model Import / Bedrock Marketplace** · **SageMaker AI endpoints** (real-time, serverless, async, batch transform: full control, open-weight or self-trained models).
-- **Integration patterns:** sync request/response (API Gateway + Lambda + Converse) · **streaming** (ConverseStream via WebSocket API, Lambda response streaming or AppSync) · **async/queue** (SQS/EventBridge → Lambda/Step Functions) · **batch** (S3 → Bedrock batch inference) · **RAG** (Knowledge Bases) · **agentic** (Bedrock Agents / AgentCore + tools).
-- **Use the Converse API** for model-agnostic code: one request/response shape across providers, plus tool use, system prompts, guardrails and document/image inputs. Use `InvokeModel` only when you need model-native request bodies (for example, embeddings or image generation) - The Converse API is Amazon Bedrock’s unified, model-agnostic API for chat-style interactions with foundation models. Instead of writing a different request format for each model provider (Anthropic, Meta, Amazon Nova, Mistral, Cohere and so on), you send one standard request shape and Bedrock translates it for whichever model you pick. Why it exists? The older InvokeModel API requires each model’s own native JSON body, so switching from Claude to Llama meant rewriting your payload and response parsing. With Converse you change only the modelId.
-
-- **Use a PoC to reduce risk.** Fix the success criteria **before** you build: quality metrics, latency (TTFT/E2E), cost per transaction, business KPI. Build on **Bedrock** (playgrounds → Converse → Knowledge Bases/Agents) with a **golden dataset**, compare models with **Bedrock Model Evaluation** (automatic, human, LLM-as-a-judge, RAG evaluation), then make a go/no-go decision.
-- **PoC → production gap:** quotas and throttling, guardrails, IAM least privilege, VPC endpoints (PrivateLink), observability (invocation logging, CloudWatch, X-Ray), cost controls (application inference profiles + tags), CI/CD, evaluation in the pipeline.
-- **Standardise with reusable building blocks:** IaC (CDK / CloudFormation, **Generative AI CDK Constructs**), **AWS Service Catalog** products, shared **Prompt Management** templates, central **Guardrails**, a shared **LLM gateway** (API Gateway + Lambda), Lambda layers/SDK wrappers, tagging standards, Organizations **SCPs**.
-- **Well-Architected Generative AI Lens** applies the **6 pillars** (Operational Excellence, Security, Reliability, Performance Efficiency, Cost Optimisation, Sustainability) across the GenAI lifecycle: **scoping → model selection → customisation → development & integration → deployment → continuous improvement**. To use it, **import it into the WA Tool as a custom lens** (JSON from the AWS samples GitHub repo).
-- **WA Tool workflow:** define the workload → apply lenses → answer questions → get **High/Medium Risk Issues (HRI/MRI)** → **improvement plan** → save **milestones** and re-review. Use **review templates** and **profiles** to make reviews repeatable across teams.
-- **Generative AI Security Scoping Matrix:** Scope **1** consumer app · **2** enterprise app · **3** pre-trained models (for example, Bedrock FMs) · **4** fine-tuned models · **5** self-trained models. A higher scope means **you own more of the security responsibility**.
+- **Requirements first, model second.** Turn the business goal into measurable **functional** requirements (task, modality, knowledge, output format) and **non-functional** ones (latency, throughput, cost, residency, compliance, availability). Only then choose the model, integration pattern and deployment option (Skill 1.1.1 §1).
+- **Customisation ladder, cheapest first:** prompt engineering → RAG → agents/tool use → fine-tuning / distillation → continued pre-training → train from scratch. Fresh or private facts → **RAG**. Style, format or domain *behaviour* → **fine-tune**. Big-model quality at small-model cost → **distillation** (§2).
+- **Integration pattern follows who is waiting:** interactive → sync or **streaming**; spiky or long-running → **async queue**; offline bulk → **batch**; grounded Q&A → **RAG**; multi-step actions → **agents**; many teams → an **LLM gateway** (§4).
+- **Deployment option:** "least operational overhead" → **Bedrock** (serverless). Full control, custom container, self-trained model → **SageMaker AI**. Your own open-weight fine-tune behind serverless Bedrock APIs → **Custom Model Import** (§5).
+- **Code to the Converse API and keep the model ID in config**, so the design isn't locked to one model ([Skill 1.2.2](02-task-1.2-select-configure-fms.md#skill-122--flexible-architecture-for-dynamic-model-selection--provider-switching)).
+- **A PoC proves feasibility, performance and business value with numbers.** Agree the success criteria **before** building, test on a **golden dataset**, compare models with **Bedrock Evaluations**, then go / no-go / pivot (Skill 1.1.2).
+- **PoC → production gaps are classic distractors:** quotas, guardrails, least-privilege IAM, VPC endpoints, invocation logging, cost tags, evaluation in CI/CD, resilience (Skill 1.1.2 §4).
+- **Standardise with a paved road:** CDK constructs (Generative AI CDK Constructs), Service Catalog products, a central LLM gateway, shared prompts and guardrails, SCPs (Skill 1.1.3 §4).
+- **Review with the WA Tool + Generative AI Lens** (imported as a **custom lens**; 6 pillars across the GenAI lifecycle) → HRIs/MRIs → improvement plan → **milestones** (Skill 1.1.3 §2–3).
+- **Generative AI Security Scoping Matrix:** scope 1 (consumer app) → 5 (self-trained model). The higher the scope, the more security responsibility you own (Skill 1.1.3 §5).
 
 ## Notes
 
@@ -64,12 +62,14 @@
 - ⚠️ A classic exam trap: "knowledge changes weekly" → **RAG, not fine-tuning**. Fine-tuning bakes facts in at training time, so they go stale and cannot be cited.
 - Combine approaches: a **fine-tuned model + RAG** works well when the model needs domain *behaviour* and also *current facts*.
 
-#### 3. Choosing the FM at design time (detail in Task 1.2)
+#### 3. Choosing the FM at design time
+With the approach chosen, shortlist a model. → Full detail: [Task 1.2 · Skill 1.2.1](02-task-1.2-select-configure-fms.md#skill-121--assess-and-choose-fms)
 - Filter by **capability** (modality, context window, tool use, languages, reasoning) → **quality** (your own eval set, not only public benchmarks) → **latency** → **cost** → **compliance** (Region availability, data residency, licence/EULA).
 - Model families on Bedrock (examples): Anthropic Claude, Amazon Nova (Micro/Lite/Pro/Premier, Canvas, Reel, Sonic), Meta Llama, Mistral, Cohere (Command, Embed, Rerank), AI21, DeepSeek, Qwen, OpenAI open-weight (gpt-oss), Amazon Titan (embeddings, image). Availability varies by Region, so check the model catalogue.
 - Don't hard-code a single model. Put the model ID in config (AppConfig / Parameter Store / Prompt Management) so you can switch models without changing code (Skill 1.2.2).
 
 #### 4. Integration patterns
+Next, decide how the application talks to the model. The main question is who is waiting for the answer, and for how long.
 
 | Pattern | Typical AWS build | Use when | Watch out |
 | --- | --- | --- | --- |
@@ -98,19 +98,20 @@ print(resp["output"]["message"]["content"][0]["text"], resp["usage"])
 ```
 
 #### 5. Deployment strategies (where the model runs)
+The design-time choice is summarised here. → Full detail: [Task 2.2 · Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements)
 
-| Option | What it is | Best for | Trade-offs |
-| --- | --- | --- | --- |
-| **Bedrock on-demand** | Serverless, pay per input/output token | Most apps, variable traffic, fastest start | Subject to TPM/RPM quotas → throttling (`ThrottlingException`) |
-| **Bedrock cross-Region inference (inference profiles)** | Routes requests across Regions in a geography (`us.`, `eu.`, `apac.`…) or **global** | Burst capacity, higher throughput, models only available in some Regions | Data may be processed in another Region of the geography; global profiles may break residency rules |
-| **Bedrock Provisioned Throughput** | Reserved **model units** (commitment terms or no-commitment, verify current terms) | Steady high volume, predictable latency, **custom models** | Pay whether you use it or not; can't buy it for Legacy models |
-| **Bedrock batch inference** | Async job over S3 JSONL | Large offline workloads at a discount vs on-demand (commonly ~50% for supported models, verify) | Hours, not seconds; quotas on records per job |
-| **Bedrock service tiers / latency-optimised inference** | Priority/Standard/Flex tiers and latency-optimised options for selected models (verify current availability) | Tuning cost vs latency for each workload | Model/Region specific |
-| **Bedrock Custom Model Import** | Bring your own open-weight model weights (for example, Llama/Mistral/Qwen-based fine-tunes) and serve them serverlessly on Bedrock | Use your SageMaker-fine-tuned model behind the Bedrock API | Only supported architectures |
-| **Bedrock Marketplace** | 100+ specialised models deployed onto managed endpoints, accessed through Bedrock APIs | Niche/specialist models | You choose the instance type and pay for it |
-| **SageMaker AI real-time endpoint** | Dedicated instances (GPU/Inferentia), autoscaling, **inference components** (several models per endpoint) | Full control, custom containers, LoRA adapters, self-trained models | You manage scaling and cost of idle capacity |
-| **SageMaker serverless / async / batch transform** | Serverless = scale to zero (no GPU) · async = large payloads, long processing, queue + scale to zero · batch transform = offline | Intermittent or heavy-payload workloads | Cold starts (serverless); not interactive (batch) |
-| **Self-managed (EKS/EC2 + vLLM, Inferentia/Trainium)** | DIY hosting | Extreme customisation, existing K8s platform | Highest operational burden |
+| Option | Choose when | Trade-offs |
+| --- | --- | --- |
+| **Bedrock on-demand** (serverless, pay per token) | Most apps, variable traffic, fastest start | TPM/RPM quotas → `ThrottlingException` |
+| **Cross-Region inference profiles** (`us.`, `eu.`, `apac.`… or **global**) | Burst capacity, models only in some Regions | Data may be processed in another Region of the geography; global may break residency |
+| **Provisioned Throughput** (reserved **model units**; commitment or no-commitment, verify terms) | Steady high volume, predictable latency, **custom models** | Pay whether used or not; can't buy it for Legacy models |
+| **Batch inference** (async S3 JSONL job) | Large offline work, discount vs on-demand (commonly ~50% for supported models, verify) | Hours, not seconds; quotas on records per job |
+| **Service tiers / latency-optimised inference** (Priority/Standard/Flex; selected models, verify) | Tuning cost vs latency per workload | Model/Region specific |
+| **Custom Model Import** (your open-weight weights, e.g. Llama/Mistral/Qwen fine-tunes) | SageMaker-fine-tuned model behind the serverless Bedrock API | Supported architectures only |
+| **Bedrock Marketplace** (100+ specialised models on managed endpoints, called via Bedrock APIs) | Niche/specialist models | You choose and pay for the instance type |
+| **SageMaker AI real-time** (GPU/Inferentia, autoscaling, **inference components**) | Full control, custom containers, LoRA adapters, self-trained models | You manage scaling and idle cost |
+| **SageMaker serverless / async / batch transform** | Serverless = scale to zero, no GPU · async = large payloads, long processing, scale to zero · batch = offline | Cold starts (serverless); not interactive (batch) |
+| **Self-managed** (EKS/EC2 + vLLM, Inferentia/Trainium) | Extreme customisation, existing K8s platform | Highest operational burden |
 
 - Rule of thumb for the exam: **"least operational overhead" → Bedrock (serverless)**. "Must run our own fine-tuned open-source model with custom container / full control" → **SageMaker AI**. "Already fine-tuned an open-weight model, want serverless Bedrock APIs" → **Custom Model Import**.
 
@@ -165,36 +166,15 @@ print(resp["output"]["message"]["content"][0]["text"], resp["usage"])
    - **Bedrock Knowledge Bases** quick create (managed vector store) to test RAG in hours; **Bedrock Agents** / **AgentCore** + Strands Agents for agent PoCs.
    - **Bedrock Prompt Management** to version prompts during iteration; **Prompt optimisation** to auto-rewrite prompts for a target model.
    - SageMaker JumpStart / Studio notebooks if you need to try open-weight models on your own endpoints.
-5. **Evaluate systematically**: **Amazon Bedrock Evaluations**
-   - **Automatic model evaluation**: built-in or custom datasets; metrics such as accuracy, robustness, toxicity.
-   - **Human evaluation**: your own work team (or AWS-managed) rates helpfulness, style, brand voice.
-   - **LLM-as-a-judge**: an evaluator model scores correctness, completeness, faithfulness, harmfulness, etc. Scales close to human-like judgement at lower cost.
-   - **RAG evaluation** (Knowledge Base evaluation): retrieval-only (context relevance/coverage) or retrieve-and-generate (correctness, faithfulness, citation quality). Works for Bedrock KBs or your own RAG (bring your own inference responses).
+5. **Evaluate systematically** with **Amazon Bedrock Evaluations**: automatic, human, **LLM-as-a-judge** and **RAG evaluation** (RAG evaluation works for Bedrock KBs or your own RAG, using bring-your-own inference responses). → Evaluation types: [Task 1.2 · Skill 1.2.1](02-task-1.2-select-configure-fms.md#skill-121--assess-and-choose-fms)
    - Compare **2–3 candidate models** on the **same dataset** with the same prompt (adapted per model if needed).
 6. **Measure performance**: log `usage` (input/output tokens) and `metrics.latencyMs` from Converse responses; CloudWatch `InvocationLatency`, `TimeToFirstToken` (where available, verify), `InvocationThrottles`; run a small load test to find the quota ceiling.
 7. **Estimate production cost**: tokens/request × requests/month × price (use the AWS Pricing Calculator), plus vector store, KB ingestion (embedding tokens), Lambda/API Gateway, logging. Compare on-demand vs batch vs Provisioned Throughput.
 8. **Pilot with real users** (small group) → collect feedback (thumbs/comments) → iterate → **decision gate**.
 9. **Document the path to production**: the gaps list (below), target architecture, cost model, risks.
 
-#### 3. PoC → production readiness gap list (frequent exam distractors)
-- **Quotas**: request TPM/RPM increases (Service Quotas), add cross-Region inference, backoff with jitter, consider Provisioned Throughput.
-- **Security**: least-privilege IAM (resource-level `bedrock:InvokeModel` on specific model/inference-profile ARNs), VPC endpoints, KMS CMKs, secrets in Secrets Manager, Guardrails, input validation, prompt-injection defences.
-- **Model access**: production accounts need model access enabled (AWS Marketplace subscription for some third-party models), and possibly SCP allow-lists.
-- **Observability**: model invocation logging (off by default, so enable it), dashboards and alarms, tracing, cost allocation tags.
-- **Quality gates**: automated evaluation in CI/CD (regression on the golden set before a prompt/model change ships). See Task 1.6.4 and Domain 5.
-- **Resilience**: fallback model, circuit breaker, graceful degradation (Task 1.2.3).
-- **Data**: production-grade ingestion pipelines, data quality checks (Task 1.3), KB sync schedule (Task 1.4.5).
-- **Governance**: prompt approval workflow, model cards / AI service cards, responsible-AI review, audit trails.
-
-#### 4. PoC anti-patterns
-- Judging on a handful of hand-picked demo prompts → no statistical confidence.
-- Over-engineering (fine-tuning, custom infra) before trying prompting + RAG.
-- Ignoring cost/latency until after the decision.
-- Using production PII in an unsecured sandbox or in PartyRock.
-- Treating the PoC code as production code (no IaC, no tests, no guardrails).
-- Locking into one model's request format (`InvokeModel` bodies) rather than **Converse**.
-
-#### 5. Example: quick model comparison script for a PoC
+#### 3. Example: quick model comparison script for a PoC
+Steps 4–6 in code: run each candidate over the golden set and record tokens and latency.
 ```python
 import boto3, time, json
 brt = boto3.client("bedrock-runtime")
@@ -210,6 +190,24 @@ for model in CANDIDATES:
               r["metrics"]["latencyMs"], round(time.time() - t0, 2))
         # store output → score later with Bedrock Evaluations (LLM-as-a-judge) or a custom judge
 ```
+
+#### 4. PoC → production readiness gap list (frequent exam distractors)
+- **Quotas**: request TPM/RPM increases (Service Quotas), add cross-Region inference, backoff with jitter, consider Provisioned Throughput.
+- **Security**: least-privilege IAM (resource-level `bedrock:InvokeModel` on specific model/inference-profile ARNs), VPC endpoints, KMS CMKs, secrets in Secrets Manager, Guardrails, input validation, prompt-injection defences.
+- **Model access**: production accounts need model access enabled (AWS Marketplace subscription for some third-party models), and possibly SCP allow-lists.
+- **Observability**: model invocation logging (off by default, so enable it), dashboards and alarms, tracing, cost allocation tags.
+- **Quality gates**: automated evaluation in CI/CD (regression on the golden set before a prompt/model change ships). See Task 1.6.4 and Domain 5.
+- **Resilience**: fallback model, circuit breaker, graceful degradation ([Task 1.2 · Skill 1.2.3](02-task-1.2-select-configure-fms.md#skill-123--resilient-ai-systems)).
+- **Data**: production-grade ingestion pipelines, data quality checks (Task 1.3), KB sync schedule (Task 1.4.5).
+- **Governance**: prompt approval workflow, model cards / AI service cards, responsible-AI review, audit trails.
+
+#### 5. PoC anti-patterns
+- Judging on a handful of hand-picked demo prompts → no statistical confidence.
+- Over-engineering (fine-tuning, custom infra) before trying prompting + RAG.
+- Ignoring cost/latency until after the decision.
+- Using production PII in an unsecured sandbox or in PartyRock.
+- Treating the PoC code as production code (no IaC, no tests, no guardrails).
+- Locking into one model's request format (`InvokeModel` bodies) rather than **Converse**.
 
 ---
 
@@ -273,6 +271,10 @@ aws wellarchitected associate-lenses --workload-id <id> --lens-aliases <lens-arn
 | **Observability baseline** | Invocation logging config, CloudWatch dashboard/alarm templates, X-Ray, cost allocation tags, **application inference profiles** | Comparable metrics and cost per app/team |
 | 🎯 **PQ22** **Account guardrails** | AWS Organizations **SCPs** (for example, deny non-approved models or Regions with `bedrock:InvokeModel` conditions), **Control Tower** controls, AWS Config rules | Enforce policy centrally |
 
+- **Multi-environment / multi-account**: separate dev/test/prod accounts. Promote the *same* IaC and *versioned* prompts/guardrails/models through pipelines (CodePipeline/GitHub Actions). Parameterise per environment (model ID, throughput type, log retention).
+- **Multi-deployment scenarios**: the same component library should work for real-time chat, batch jobs and agents. Design components to be **composable** (retrieval module, generation module, guardrail module).
+- **Tagging standard**: `app`, `team`, `env`, `cost-centre`, `data-classification`, applied to inference profiles, KBs, buckets and endpoints.
+
 > [!IMPORTANT]
 > **🎯 Practice question 27 — reusable approved components across business units, Bedrock + SageMaker, consistent security and observability**
 >
@@ -280,10 +282,6 @@ aws wellarchitected associate-lenses --workload-id <id> --lens-aliases <lens-arn
 > - ❌ **One account, multi-tenant:** a bigger blast radius, and nothing reusable.
 > - ❌ **A custom SageMaker pipeline + endpoint + monitoring per business unit:** fragmented and duplicated.
 > - ❌ **A separate CloudFormation template per business unit:** the templates drift apart and nothing is shared.
-
-- **Multi-environment / multi-account**: separate dev/test/prod accounts. Promote the *same* IaC and *versioned* prompts/guardrails/models through pipelines (CodePipeline/GitHub Actions). Parameterise per environment (model ID, throughput type, log retention).
-- **Multi-deployment scenarios**: the same component library should work for real-time chat, batch jobs and agents. Design components to be **composable** (retrieval module, generation module, guardrail module).
-- **Tagging standard**: `app`, `team`, `env`, `cost-centre`, `data-classification`, applied to inference profiles, KBs, buckets and endpoints.
 
 #### 5. Generative AI Security Scoping Matrix (supporting framework)
 
@@ -338,6 +336,30 @@ aws wellarchitected associate-lenses --workload-id <id> --lens-aliases <lens-arn
 ## Flashcards
 
 <details>
+<summary><b>Q:</b> Which non-functional requirements should you capture before choosing an FM?</summary>
+
+Latency (TTFT vs end-to-end), throughput (TPM/RPM vs quotas), cost per request, availability/resilience, security and compliance (data residency, encryption, private connectivity), responsible-AI controls, operability and sustainability.
+
+*D1 · Task 1.1 · NFRs*
+</details>
+
+<details>
+<summary><b>Q:</b> Interactive chat vs nightly report generation: which latency metric matters for each?</summary>
+
+Interactive chat: time to first token (TTFT), so stream the output. Nightly/batch report: end-to-end latency (or just throughput and cost).
+
+*D1 · Task 1.1 · Latency metrics*
+</details>
+
+<details>
+<summary><b>Q:</b> The requirement is "data must not leave the EU" and you need more burst capacity. Which inference option should you use?</summary>
+
+An EU geographic cross-Region inference profile (`eu.` prefix). It routes only within EU Regions. Avoid global inference profiles.
+
+*D1 · Task 1.1 · Data residency*
+</details>
+
+<details>
 <summary><b>Q:</b> List the customisation ladder from cheapest to most expensive.</summary>
 
 Prompt engineering → RAG → agents/tool use → fine-tuning / distillation → continued pre-training → training from scratch. Always start at the top and move down only when evaluation shows you need to.
@@ -351,14 +373,6 @@ Prompt engineering → RAG → agents/tool use → fine-tuning / distillation �
 RAG (for example, Bedrock Knowledge Bases). Fine-tuning fixes knowledge at training time, so it goes stale and can't give citations. RAG retrieves current documents at query time.
 
 *D1 · Task 1.1 · RAG vs fine-tuning*
-</details>
-
-<details>
-<summary><b>Q:</b> Which non-functional requirements should you capture before choosing an FM?</summary>
-
-Latency (TTFT vs end-to-end), throughput (TPM/RPM vs quotas), cost per request, availability/resilience, security and compliance (data residency, encryption, private connectivity), responsible-AI controls, operability and sustainability.
-
-*D1 · Task 1.1 · NFRs*
 </details>
 
 <details>
@@ -418,19 +432,19 @@ Automatic model evaluation (built-in/custom datasets and metrics), human evaluat
 </details>
 
 <details>
-<summary><b>Q:</b> Name five PoC-to-production gaps that are often missed.</summary>
-
-Service quotas/throttling, least-privilege IAM and VPC endpoints, guardrails, model invocation logging and monitoring, cost allocation, automated evaluation in CI/CD, fallback/resilience, production data pipelines, prompt/model governance.
-
-*D1 · Task 1.1 · Production readiness*
-</details>
-
-<details>
 <summary><b>Q:</b> What is PartyRock, and when should you not use it?</summary>
 
 A no-code Bedrock-powered playground for exploring GenAI app ideas. Don't use it for production workloads or with confidential/PII data.
 
 *D1 · Task 1.1 · Prototyping tools*
+</details>
+
+<details>
+<summary><b>Q:</b> Name five PoC-to-production gaps that are often missed.</summary>
+
+Service quotas/throttling, least-privilege IAM and VPC endpoints, guardrails, model invocation logging and monitoring, cost allocation, automated evaluation in CI/CD, fallback/resilience, production data pipelines, prompt/model governance.
+
+*D1 · Task 1.1 · Production readiness*
 </details>
 
 <details>
@@ -450,6 +464,22 @@ Scoping → model selection → model customisation → development & integratio
 </details>
 
 <details>
+<summary><b>Q:</b> Which Well-Architected lens should you use for a traditional ML (non-GenAI) model on SageMaker?</summary>
+
+The Machine Learning Lens. The Generative AI Lens is for FM-based workloads (Bedrock, SageMaker-hosted FMs, Amazon Q).
+
+*D1 · Task 1.1 · Lens selection*
+</details>
+
+<details>
+<summary><b>Q:</b> Which Security pillar risks does the Generative AI Lens call out specifically?</summary>
+
+Protecting GenAI endpoints, harmful outputs, excessive agency (agents with too much power), monitoring/auditing events, securing prompts, and model/data poisoning.
+
+*D1 · Task 1.1 · Generative AI Lens security*
+</details>
+
+<details>
 <summary><b>Q:</b> How do you start a Generative AI Lens review in the AWS WA Tool?</summary>
 
 Download the Generative AI Lens JSON from the AWS samples custom-lens GitHub repo, import it as a custom lens, publish a version, associate it with the workload and answer the questions. Then work through the HRIs/MRIs in the improvement plan.
@@ -463,14 +493,6 @@ Download the Generative AI Lens JSON from the AWS samples custom-lens GitHub rep
 Milestones snapshot a review to track progress over time. Review templates pre-fill answers for consistent reviews across many workloads. Custom lenses encode your organisation's own best-practice questions and can be versioned and shared.
 
 *D1 · Task 1.1 · WA Tool features*
-</details>
-
-<details>
-<summary><b>Q:</b> Which Security pillar risks does the Generative AI Lens call out specifically?</summary>
-
-Protecting GenAI endpoints, harmful outputs, excessive agency (agents with too much power), monitoring/auditing events, securing prompts, and model/data poisoning.
-
-*D1 · Task 1.1 · Generative AI Lens security*
 </details>
 
 <details>
@@ -503,30 +525,6 @@ Use AWS Organizations SCPs or IAM policies that allow `bedrock:InvokeModel*` onl
 Scope 3 = pre-trained models (for example, Bedrock FMs via API). Scope 4 = fine-tuned models. Scope 5 = self-trained models. Responsibility grows with scope.
 
 *D1 · Task 1.1 · Security Scoping Matrix*
-</details>
-
-<details>
-<summary><b>Q:</b> Interactive chat vs nightly report generation: which latency metric matters for each?</summary>
-
-Interactive chat: time to first token (TTFT), so stream the output. Nightly/batch report: end-to-end latency (or just throughput and cost).
-
-*D1 · Task 1.1 · Latency metrics*
-</details>
-
-<details>
-<summary><b>Q:</b> The requirement is "data must not leave the EU" and you need more burst capacity. Which inference option should you use?</summary>
-
-An EU geographic cross-Region inference profile (`eu.` prefix). It routes only within EU Regions. Avoid global inference profiles.
-
-*D1 · Task 1.1 · Data residency*
-</details>
-
-<details>
-<summary><b>Q:</b> Which Well-Architected lens should you use for a traditional ML (non-GenAI) model on SageMaker?</summary>
-
-The Machine Learning Lens. The Generative AI Lens is for FM-based workloads (Bedrock, SageMaker-hosted FMs, Amazon Q).
-
-*D1 · Task 1.1 · Lens selection*
 </details>
 
 ---

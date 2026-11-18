@@ -11,40 +11,16 @@
 > - **Skill 3.1.5:** **Advanced threat detection** for adversarial inputs (prompt injection / jailbreak detection, sanitisation, safety classifiers, automated adversarial testing)
 
 ## Key points
-- **Bedrock Guardrails policy map:** harmful categories → **content filters** (Hate, Insults, Sexual, Violence, Misconduct + **Prompt Attack**) · banned subject → **denied topics** · exact words / competitors / profanity → **word filters** · PII + regex → **sensitive information filters** (BLOCK or ANONYMIZE) · RAG hallucination → **contextual grounding** (grounding + relevance) · logical/policy rule verification → **Automated Reasoning checks**.
-- **Filter strength is inverse to confidence:** HIGH strength blocks LOW + MEDIUM + HIGH-confidence detections (most aggressive); LOW strength blocks only HIGH-confidence detections. Every policy has an action: **BLOCK** or **NONE (detect only)**. Use detect mode to tune before you enforce.
-- **Prompt attack filter** covers **jailbreaks**, **prompt injection**, and **prompt leakage (Standard tier only)**. With InvokeModel you **must** wrap user input in **input tags** (`amazon-bedrock-guardrails-guardContent_<suffix>`). Without tags, prompt attacks are **not filtered**.
-- 🚨 **Guardrails don't evaluate tool traffic:** `toolResult` content, tool definitions (`toolSpec`) and model-generated `toolUse.input` are **not evaluated** by a guardrail attached in `guardrailConfig`. **Indirect prompt injection** through tool results or retrieved documents therefore needs **ApplyGuardrail** on that content, or your own sanitisation.
-- **ApplyGuardrail** = evaluate any text **without invoking a model**: `source: INPUT | OUTPUT` → `action: GUARDRAIL_INTERVENED | NONE`. Use it for non-Bedrock models, pre-retrieval checks, tool outputs and offline test suites. `outputScope: FULL` returns non-detected entries too, for debugging.
-- **Safeguard tiers:** **Classic** supports EN/FR/ES, with denied topic definitions ≤ **200 chars** · **Standard** is more robust, supports many languages, detects **prompt leakage**, protects code (comments, variable names, strings), allows denied topic definitions ≤ **1,000 chars**, and **requires guardrail cross-Region inference** (a guardrail profile).
-- **Contextual grounding thresholds** run **0 to 0.99** (1 is invalid). A response with a score **below** the threshold is blocked. Limits: grounding source **100,000 chars**, query **1,000 chars**, response **5,000 chars**. It runs on **output only**. Classic tier = strict grounding, no conversational use cases.
-- **Streaming:** **sync** (the default) buffers and scans chunks before sending them, which adds latency but is accurate · **async** sends chunks immediately and scans in the background, so harmful text can reach the user, and **PII masking is not supported**.
-- 🎯 **PQ51** **Hallucination stack:** KB grounding + **citations** → contextual grounding check → **Automated Reasoning** for rule-bound domains → **structured output** (JSON Schema / forced tool use) + Lambda validation → **semantic similarity / self-consistency** confidence scoring → fall back to "I don't know" or a human.
-- **Deterministic data answers → text-to-SQL:** the LLM writes SQL, a read-only DB executes it, and the numbers come from the database, not the model. Validate the SQL with an allow-list and parser, and run it under a **read-only IAM role / DB user**.
-- 🎯 **PQ69** **Defense-in-depth order:** API Gateway (auth, WAF, size limits, request validation) → Lambda sanitisation + **Comprehend** (`DetectToxicContent`, prompt-safety classifier, PII) → **Guardrails input** → FM with a hardened system prompt → **Guardrails output** → Lambda post-validation (schema, URLs, PII) → API Gateway response → logs and metrics.
-- **Red teaming** = automated adversarial suites (jailbreak corpora, injection payloads, encoded/obfuscated prompts) run through **ApplyGuardrail / Bedrock Evaluations** in CI/CD. Track **intervention rate** and false positives in CloudWatch, and promote a new **guardrail version** only when the suite passes.
-
-> [!IMPORTANT]
-> **🎯 Practice question 69 — symptom checker app (API Gateway → Lambda → Bedrock): layered input and output safety, fewest app changes**
->
-> Keep API Gateway, and put a **Step Functions** workflow behind it:
-> 1. **Lambda pre-processing:** input sanitisation + **prompt injection checks**.
-> 2. **Guardrails** on prompts **and** responses.
-> 3. **Knowledge base of approved medical content** → grounded answers, fewer hallucinations.
-> 4. **Lambda post-processing:** validate the response (grounded and safe?). Return an **error through API Gateway** if it isn't.
-> - ❌ **WAF keyword rules + disabling Lambda:** can't catch subtle attacks, and it breaks the existing integration.
-> - ❌ **Output-only guardrails + offline S3 review:** no input protection or grounding.
-> - ❌ **Comprehend PII and sentiment + no guardrails + manual log review:** no injection defence and no real-time output safety.
-
-> [!IMPORTANT]
-> **🎯 Practice question 51 — recommendations from structured RDS travel history, consistent and accurate across airlines**
->
-> - **Structured relational data → text-to-SQL with SQL validation**, not RAG or vectors. The database returns **exact rows**: bookings, preferences, loyalty tier.
-> - **Guardrails** on the responses.
-> - **Confidence scoring + semantic similarity checks** (for example against the retrieved rows or reference answers) → **reduce hallucinations**.
-> - ❌ **KB RAG or OpenSearch vectors over tables:** chunking or embedding rows **loses the relationships between rows and columns**.
-> - ❌ **Text-to-SQL + Step Functions/Lambda "validation workflows":** close, but **missing confidence scoring and semantic similarity**, which the answer key treats as the anti-hallucination mechanism.
-> - 🔁 **Same idea as PQ9**, applied here to accuracy rather than injection.
+- **Bedrock Guardrails is the centre of this task:** one named, versioned, model-agnostic resource that holds several **policies**. Pick the policy by the threat (harmful category, banned subject, exact word, PII, ungrounded answer, rule violation) → policy map in Skill 3.1.1.
+- **Filter strength is inverse to confidence** (HIGH strength = most aggressive). MEDIUM is the usual balance; tune in **detect mode (`NONE`)** before you enforce → 3.1.1.
+- **Inline `guardrailConfig` vs `ApplyGuardrail`:** inline for Bedrock model calls; **ApplyGuardrail** for any text without a model call (non-Bedrock models, pre-retrieval checks, tool output, test suites) → 3.1.1.
+- 🚨 **Guardrails don't evaluate tool traffic** (`toolResult`, `toolSpec`, `toolUse.input`), and with InvokeModel untagged input isn't checked for prompt attacks → tag user input, ApplyGuardrail on tool/retrieved content (3.1.1, 3.1.5).
+- **Classic vs Standard tier:** choose Standard for multilingual apps, prompt-leakage detection, code, and conversational grounding; it needs guardrail cross-Region inference → 3.1.1.
+- **Output streaming:** **sync** (default, safer, supports PII masking) vs **async** (lowest latency, harmful chunk can slip through, no masking) → 3.1.2.
+- **Deterministic numbers → text-to-SQL** on a read-only DB, not generated values → 3.1.2.
+- 🎯 **PQ51** **Hallucination stack:** KB grounding + citations → contextual grounding check → **Automated Reasoning** for rule-bound domains → structured output + Lambda validation → confidence scoring → "I don't know" or a human → 3.1.3.
+- 🎯 **PQ69** **Defense in depth:** API Gateway/WAF → Lambda + Comprehend → Guardrails input → hardened FM → Guardrails output → Lambda post-validation → API response filtering → logs and metrics → 3.1.4.
+- **Adversarial inputs:** direct vs **indirect** prompt injection need different controls; **red-team** suites run in CI/CD and gate guardrail promotion on attack success and false-positive rates → 3.1.5.
 
 ## Notes
 
@@ -52,11 +28,40 @@
 
 > *Develop comprehensive content safety systems to protect against harmful user inputs to FMs (for example, by using Amazon Bedrock guardrails to filter content, Step Functions and Lambda functions to implement custom moderation workflows, real-time validation mechanisms).*
 
+This skill is the home for Bedrock Guardrails: what a guardrail is, each policy type, and how to attach one. Output-side behaviour (streaming, detect mode on responses) is in 3.1.2, and contextual grounding / Automated Reasoning in 3.1.3.
+
 #### Bedrock Guardrails — anatomy
 - A guardrail is a **named, versioned** resource. It needs **at least one policy** plus **blocked messaging** (one message for blocked prompts and one for blocked responses; each can be customised).
-- Lifecycle: **DRAFT** (working copy, editable, for testing) → `CreateGuardrailVersion` → **immutable numbered version** (1, 2, 3…). Production code references the **guardrail ID + numbered version**, never DRAFT.
-- Encryption: an AWS-managed key by default, or a **customer-managed KMS key** (`kmsKeyId`). Guardrails can be **tagged** (useful for ABAC and cost allocation).
 - Model-agnostic: the same guardrail works with any Bedrock model, Agents, Knowledge Bases, Flows, and (through ApplyGuardrail) **models hosted anywhere**, including SageMaker, self-hosted or third-party APIs.
+
+**Policy map: which policy for which threat**
+
+| Need | Policy | Direction | Detail |
+| --- | --- | --- | --- |
+| Harmful categories (Hate, Insults, Sexual, Violence, Misconduct) | **Content filters** (text and image) | Input + output | Below |
+| Jailbreak / prompt injection / prompt leakage | **Prompt Attack** content filter | **Input only** | Below, and 3.1.5 |
+| Banned subject ("investment advice") | **Denied topics** | Input + output | Below |
+| Exact words, competitors, profanity | **Word filters** | Input + output | Below |
+| PII + custom regex | **Sensitive information filters** (BLOCK or ANONYMIZE) | Input + output | [Task 3.2 · Skill 3.2.2](02-task-3.2-data-security-privacy.md#skill-322--privacy-preserving-systems-pii-detection-bedrock-privacy-guardrails-retention) |
+| RAG hallucination | **Contextual grounding** (grounding + relevance) | **Output only** | 3.1.3 |
+| Logical / policy rule verification | **Automated Reasoning checks** | Output | 3.1.3 |
+
+- **Actions:** every policy has an action of **BLOCK** or **NONE (detect only)**; sensitive information filters add **ANONYMIZE**. Use detect mode to tune before you enforce.
+- **Lifecycle:** **DRAFT** (working copy, editable, for testing) → `CreateGuardrailVersion` → **immutable numbered version** (1, 2, 3…). Production code references the **guardrail ID + numbered version**, never DRAFT.
+- **Encryption:** an AWS-managed key by default, or a **customer-managed KMS key** (`kmsKeyId`). Guardrails can be **tagged** (useful for ABAC and cost allocation).
+
+**Safeguard tiers**
+
+| | **Classic** | **Standard** |
+| --- | --- | --- |
+| Languages | EN / FR / ES | Many languages |
+| Prompt leakage detection | ❌ | ✅ |
+| Harmful content in code (comments, variable/function names, string literals) | ❌ | ✅ |
+| Denied topic definition length | ≤ **200 chars** | ≤ **1,000 chars** |
+| Contextual grounding | Strict; no conversational use cases | Handles reasoning and conversational responses (3.1.3) |
+| Requirement | — | **Guardrail cross-Region inference** (a guardrail profile) |
+
+- ⚠️ `UpdateGuardrail` **replaces the whole policy config**. If you leave out `tierConfig`, the tier resets to CLASSIC.
 - ⚠️ **Blocked content appears in plain text in model invocation logs** if logging is enabled. Treat the logs as sensitive (KMS, restricted access), or turn logging off for those workloads.
 
 #### Content filters (text and image) 🎯 PQ63
@@ -70,6 +75,34 @@
 | **Misconduct** | Seeking or giving info on criminal activity, harming or defrauding people |
 | **Prompt Attack** | Jailbreaks, prompt injection, prompt leakage (Standard) — **input only** |
 
+- **Per-category, per-direction** settings: `inputStrength` / `outputStrength` (NONE · LOW · MEDIUM · HIGH), `inputAction` / `outputAction` (BLOCK · NONE), `inputEnabled` / `outputEnabled`, `inputModalities` / `outputModalities` (`TEXT`, `IMAGE`).
+- **Strength is inverse to confidence:**
+
+| Filter strength | Blocks detections with confidence | Effect |
+| --- | --- | --- |
+| NONE | — | Off |
+| LOW | HIGH only | Least restrictive; few false positives |
+| MEDIUM | HIGH + MEDIUM | Balanced |
+| HIGH | HIGH + MEDIUM + LOW | Most restrictive; most false positives |
+
+- **Image filters**: the same categories can be applied to images (multimodal input/output) by setting the `IMAGE` modality.
+
+#### Denied topics 🎯 PQ26
+- Defined in **natural language**: a name, a **definition** (length limit by tier, above) and **optional sample phrases**. Matching is **intent-based** and semantic, not keyword matching.
+- Applies to inputs and/or outputs. Examples: an "investment advice" topic on a banking bot, or "medical diagnosis" on a retail assistant.
+- Write the definition as a **description of the topic**, not as an instruction ("Investment advice is…", not "Don't give investment advice"). Don't include examples or exceptions inside the definition. Put examples in sample phrases. *(AWS best-practice guidance — verify in docs for current wording.)*
+
+#### Word filters
+- **Exact-match** custom words/phrases (for example competitor names or internal codenames) plus a **managed profanity list**.
+- Cheap and deterministic, but **trivially bypassed** by misspellings or synonyms. Pair it with denied topics and content filters.
+
+#### Sensitive information filters (summary — detail lives in Task 3.2)
+- Predefined PII entity types + **custom regex**; actions **BLOCK** or **ANONYMIZE** (mask → `{NAME}`, `{EMAIL}`…), per direction.
+- ⚠️ Masking on **input** stops the model from seeing PII. Masking on **output only** means the **model still saw the PII**.
+- → Full detail (Comprehend vs Macie vs Guardrails, regex limits, what masking doesn't cover): [Task 3.2 · Skill 3.2.2](02-task-3.2-data-security-privacy.md#skill-322--privacy-preserving-systems-pii-detection-bedrock-privacy-guardrails-retention).
+
+The two practice questions below combine several of these policies in one guardrail.
+
 > [!IMPORTANT]
 > **🎯 Practice question 63 — bank assistant: no investment advice, block harmful content, mask PII, audit, FEW false positives, several handling strategies**
 >
@@ -82,24 +115,6 @@
 > - ❌ **Separate guardrails chained in Step Functions:** latency and failure points, when one guardrail can hold every policy.
 > - ❌ **HIGH for all categories + BLOCK all PII:** too many false positives, and only **one** handling strategy.
 
-- **Per-category, per-direction** settings: `inputStrength` / `outputStrength` (NONE · LOW · MEDIUM · HIGH), `inputAction` / `outputAction` (BLOCK · NONE), `inputEnabled` / `outputEnabled`, `inputModalities` / `outputModalities` (`TEXT`, `IMAGE`).
-- **Strength is inverse to confidence:**
-
-| Filter strength | Blocks detections with confidence | Effect |
-| --- | --- | --- |
-| NONE | — | Off |
-| LOW | HIGH only | Least restrictive; few false positives |
-| MEDIUM | HIGH + MEDIUM | Balanced |
-| HIGH | HIGH + MEDIUM + LOW | Most restrictive; most false positives |
-
-- **Image filters**: the same categories can be applied to images (multimodal input/output) by setting the `IMAGE` modality.
-- **Standard tier + code**: also catches harmful content hidden in **code comments, variable/function names, string literals**.
-
-#### Denied topics 🎯 PQ26
-- Defined in **natural language**: a name, a **definition** (≤ 200 chars Classic / ≤ 1,000 chars Standard) and **optional sample phrases**. Matching is **intent-based** and semantic, not keyword matching.
-- Applies to inputs and/or outputs. Examples: an "investment advice" topic on a banking bot, or "medical diagnosis" on a retail assistant.
-- Write the definition as a **description of the topic**, not as an instruction ("Investment advice is…", not "Don't give investment advice"). Don't include examples or exceptions inside the definition. Put examples in sample phrases. *(AWS best-practice guidance — verify in docs for current wording.)*
-
 > [!IMPORTANT]
 > **🎯 Practice question 26 — no investment advice, no customer PII, audit every interaction**
 >
@@ -108,16 +123,7 @@
 > - ❌ **IAM + CloudWatch keyword monitoring:** no content filtering.
 > - ❌ **Denied topics + CloudWatch alarms:** no PII filter and no full interaction log.
 
-#### Word filters
-- **Exact-match** custom words/phrases (for example competitor names or internal codenames) plus a **managed profanity list**.
-- Cheap and deterministic, but **trivially bypassed** by misspellings or synonyms. Pair it with denied topics and content filters.
-
-#### Sensitive information filters (summary — detail lives in Task 3.2)
-- Predefined PII entity types + **custom regex**; actions **BLOCK** or **ANONYMIZE** (mask → `{NAME}`, `{EMAIL}`…), per direction.
-- ⚠️ Masking on **input** stops the model from seeing PII. Masking on **output only** means the **model still saw the PII**.
-- Detail (Comprehend vs Macie vs Guardrails, anonymisation strategies) → [Task 3.2](02-task-3.2-data-security-privacy.md).
-
-#### Applying a guardrail to inputs
+#### Applying a guardrail (inline or ApplyGuardrail)
 
 | Integration | How |
 | --- | --- |
@@ -128,6 +134,7 @@
 | Flows | Prompt/KB nodes can reference a guardrail |
 | Anything else | **`ApplyGuardrail`** (`source: INPUT`) before you call the model |
 
+- **Input tags with InvokeModel:** wrap user input in `amazon-bedrock-guardrails-guardContent_<suffix>` tags. **Without tags, prompt attacks are not filtered.**
 - **Selective evaluation with `guardContent`:** once **any** `guardContent` block is present, the guardrail evaluates **only** the `guardContent` blocks and skips other text blocks. Typical use is to guard **just the latest user turn**, not the whole history or your own instructions.
 - **System prompts are not evaluated** unless you wrap them in `guardContent` inside `system`.
 
@@ -152,9 +159,11 @@ if resp["stopReason"] == "guardrail_intervened":
 
 - On intervention: `stopReason = "guardrail_intervened"`, `output` = your **blocked message**, usage tokens = 0 when it is blocked **on input** (the model is never called, so you aren't charged for model tokens).
 - ⚠️ **Masking also returns `guardrail_intervened`.** To tell a mask from a block, read `trace.guardrail…sensitiveInformationPolicy[].action` (`ANONYMIZED` vs `BLOCKED`). The trace holds the **unmasked values** (`match`, `modelOutput`), so treat it as sensitive and don't log it with normal responses.
+- **`ApplyGuardrail`** evaluates any text **without invoking a model**: request `guardrailIdentifier`, `guardrailVersion`, `source: INPUT | OUTPUT`, `content` → response `action: GUARDRAIL_INTERVENED | NONE`, `outputs`, `assessments`. Use it for non-Bedrock models, pre-retrieval checks, tool outputs and offline test suites. `outputScope: FULL` returns non-detected entries too, for debugging.
+- 🚨 **Tool traffic is not evaluated:** `toolResult` content, tool definitions (`toolSpec`) and model-generated `toolUse.input` are **not evaluated** by a guardrail attached in `guardrailConfig`. **Indirect prompt injection** through tool results or retrieved documents therefore needs **ApplyGuardrail** on that content, or your own sanitisation (→ 3.1.5).
 
 #### Custom moderation workflows (Step Functions + Lambda)
-Use custom moderation when Guardrails alone isn't enough: domain-specific rules, multi-step checks, human review, or moderating **user-generated content asynchronously** (for example reviews, forum posts or uploaded images before they enter a KB).
+Guardrails covers most inline needs. Use custom moderation when it isn't enough: domain-specific rules, multi-step checks, human review, or moderating **user-generated content asynchronously** (for example reviews, forum posts or uploaded images before they enter a KB).
 
 ```
 API GW → Step Functions (Express for sync <5 min; Standard for long/human)
@@ -203,6 +212,7 @@ API GW → Step Functions (Express for sync <5 min; Standard for long/human)
 - ⚠️ Relevance in streaming: if **any** chunk is relevant, the whole response is treated as relevant, so an irrelevant response can be fully streamed before it is flagged.
 
 #### FM-based moderation and toxicity evaluation ("specialised FM evaluations")
+Beyond Guardrails, you can moderate with other models and classifiers:
 - **LLM-as-a-judge moderation:** a second, small, cheap model (for example a Nova Micro/Lite or Claude Haiku-class model) classifies the response against a **rubric** (toxicity, bias, brand tone, policy) and returns structured JSON `{label, score, reason}`.
 - **Amazon Comprehend trust and safety**:
   - 🎯 **PQ60** **`DetectToxicContent`**: per-segment toxicity score plus labels such as `HATE_SPEECH`, `HARASSMENT_OR_ABUSE`, `INSULT`, `PROFANITY`, `SEXUAL`, `VIOLENCE_OR_THREAT`, `GRAPHIC`. Language support is limited, mainly English (verify in docs).
@@ -249,6 +259,16 @@ User question → Bedrock (schema + few-shot NL→SQL examples in prompt, temper
 > - ❌ **CloudTrail + IAM + WAF alone:** no inspection of the natural-language prompt and no schema check.
 > - ❌ **Training a custom SageMaker text-to-SQL model + VPC endpoints:** a lot of work, and still no content filtering or validation.
 
+> [!IMPORTANT]
+> **🎯 Practice question 51 — recommendations from structured RDS travel history, consistent and accurate across airlines**
+>
+> - **Structured relational data → text-to-SQL with SQL validation**, not RAG or vectors. The database returns **exact rows**: bookings, preferences, loyalty tier.
+> - **Guardrails** on the responses.
+> - **Confidence scoring + semantic similarity checks** (for example against the retrieved rows or reference answers) → **reduce hallucinations**.
+> - ❌ **KB RAG or OpenSearch vectors over tables:** chunking or embedding rows **loses the relationships between rows and columns**.
+> - ❌ **Text-to-SQL + Step Functions/Lambda "validation workflows":** close, but **missing confidence scoring and semantic similarity**, which the answer key treats as the anti-hallucination mechanism.
+> - 🔁 **Same idea as PQ9**, applied here to accuracy rather than injection.
+
 ---
 
 ### Skill 3.1.3 — Accuracy verification systems to reduce hallucinations
@@ -264,7 +284,9 @@ User question → Bedrock (schema + few-shot NL→SQL examples in prompt, temper
 | Fabricated entity / citation | Invents a policy number or paper | Citations + post-validation of IDs/URLs |
 | Temporal | Outdated info | Fresh KB sync (Task 1.4), dates in metadata |
 | Logical / rule | Violates business rules | **Automated Reasoning checks** |
-| Numeric | Wrong totals | Tools / text-to-SQL |
+| Numeric | Wrong totals | Tools / text-to-SQL (3.1.2) |
+
+The sections below follow the hallucination stack: ground the answer, check the grounding, verify rules, score confidence, then constrain the format.
 
 #### Grounding with Bedrock Knowledge Bases
 - `RetrieveAndGenerate` returns **citations** (`citations[].retrievedReferences[]` with source location and text). Show them to users and **verify** that every claim maps to a citation.
@@ -273,25 +295,14 @@ User question → Bedrock (schema + few-shot NL→SQL examples in prompt, temper
 
 #### Contextual grounding check (Guardrails) 🎯 PQ30
 - **Grounding** score asks whether the response is supported by the source; any *new* information lowers it. **Relevance** score asks whether it answers the query.
-- Thresholds **0–0.99**: a score below the threshold means the response is blocked (or flagged with `NONE`). A good starting point is **0.7**. Higher values block more, including valid paraphrases.
+- Thresholds **0–0.99** (1 is invalid): a score below the threshold means the response is blocked (or flagged with `NONE`). A good starting point is **0.7**. Higher values block more, including valid paraphrases.
 - It needs three inputs: **grounding source**, **query** and **content to guard** (the model response). It runs on **output only**.
   - Converse / ApplyGuardrail: `guardContent.text.qualifiers: ["grounding_source"]`, `["query"]`. In ApplyGuardrail, add an **unqualified block** (or one marked `guard_content`) holding the response.
   - InvokeModel: tags `amazon-bedrock-guardrails-groundingSource_xyz` / `amazon-bedrock-guardrails-query_xyz`.
   - Content tagged `grounding_source` or `query` is **excluded from other policies**. Add the `guard_content` qualifier as well if you want it filtered.
 - Multiple `grounding_source` blocks are **combined** and evaluated together.
 - Limits: source **100k chars**, query **1k chars**, response **5k chars**.
-- **Classic tier** = strict grounding (penalises reasonable inference and conversational phrasing; EN/FR/ES). **Standard tier** = handles reasoning and conversational responses, gives more consistent scores and supports more languages, but needs **cross-Region guardrail inference** and is available in a **subset of Regions** (other Regions → `ValidationException`). If you switch tiers, **re-tune your thresholds**.
-- ⚠️ `UpdateGuardrail` **replaces the whole policy config**. If you leave out `tierConfig`, the tier resets to CLASSIC.
-
-> [!IMPORTANT]
-> **🎯 Practice question 30 — clinical KB invents treatments: detect it before release, against verified info, across rephrased questions**
->
-> - **Reference (golden) dataset** of validated question-answer pairs taken from the clinical guidelines, **including paraphrased versions of each question**.
-> - **Guardrails contextual grounding check** → flags responses **not grounded** in the approved sources. Add **output diffing** across the paraphrases for consistency.
-> - **Bedrock evaluations** with that custom dataset → measure **factual accuracy / correctness** and spot inconsistencies before release.
-> - ❌ **Logs Insights keyword rules + exact-match DynamoDB lookup:** no semantic understanding.
-> - ❌ **Guardrails pattern rules + SageMaker Feature Store:** Feature Store serves ML features, not reference knowledge.
-> - ❌ **Automatic eval job + anomaly alarms:** no grounding check against verified sources.
+- **Tier behaviour:** **Classic** = strict grounding (penalises reasonable inference and conversational phrasing; EN/FR/ES). **Standard** = handles reasoning and conversational responses, gives more consistent scores and supports more languages, but needs **cross-Region guardrail inference** and is available in a **subset of Regions** (other Regions → `ValidationException`). If you switch tiers, **re-tune your thresholds** (and remember the `tierConfig` reset gotcha in 3.1.1).
 
 ```python
 bedrock.apply_guardrail(
@@ -303,6 +314,16 @@ bedrock.apply_guardrail(
   ])
 # assessments[].contextualGroundingPolicy.filters[] → {type: GROUNDING|RELEVANCE, score, threshold, action}
 ```
+
+> [!IMPORTANT]
+> **🎯 Practice question 30 — clinical KB invents treatments: detect it before release, against verified info, across rephrased questions**
+>
+> - **Reference (golden) dataset** of validated question-answer pairs taken from the clinical guidelines, **including paraphrased versions of each question**.
+> - **Guardrails contextual grounding check** → flags responses **not grounded** in the approved sources. Add **output diffing** across the paraphrases for consistency.
+> - **Bedrock evaluations** with that custom dataset → measure **factual accuracy / correctness** and spot inconsistencies before release.
+> - ❌ **Logs Insights keyword rules + exact-match DynamoDB lookup:** no semantic understanding.
+> - ❌ **Guardrails pattern rules + SageMaker Feature Store:** Feature Store serves ML features, not reference knowledge.
+> - ❌ **Automatic eval job + anomaly alarms:** no grounding check against verified sources.
 
 #### Automated Reasoning checks
 - You create an **Automated Reasoning policy** from **natural-language source documents** (for example HR leave rules or insurance eligibility). Bedrock extracts **variables and logical rules** (formal logic), which you review and test.
@@ -350,7 +371,7 @@ Structured output stops format hallucinations, such as missing fields, invented 
 ```
 
 - ⚠️ A schema validates **shape, not truth**. `policy_clause_ids` can still be invented, so **cross-check the IDs against the source** in post-processing.
-- ⚠️ Guardrails **don't evaluate `toolUse.input`**. If the structured output can contain user-visible text, run **ApplyGuardrail (OUTPUT)** on those fields.
+- ⚠️ Forced tool use puts the answer in `toolUse.input`, which guardrails don't evaluate (3.1.1). If the structured output can contain user-visible text, run **ApplyGuardrail (OUTPUT)** on those fields.
 
 ---
 
@@ -358,19 +379,8 @@ Structured output stops format hallucinations, such as missing fields, invented 
 
 > *Create defense-in-depth safety systems to provide comprehensive protection against FM misuse (for example, by using Amazon Comprehend to develop pre-processing filters, Amazon Bedrock to implement model-based guardrails, Lambda functions to perform post-processing validation, API Gateway to implement API response filtering).*
 
-> [!IMPORTANT]
-> **🎯 Practice question 47 — every inference must follow policy: block bad prompts first, filter the stream live, send flagged items to humans**
->
-> Step Functions workflow:
-> 1. **Lambda pre-check with `ApplyGuardrail` (source `INPUT`)** → harmful prompts are blocked **before** any model call.
-> 2. **`InvokeModelWithResponseStream` with the guardrail attached** → **in-stream** output filtering.
-> 3. **Lambda post-check with `ApplyGuardrail` (source `OUTPUT`)** → flagged items go to an **SQS queue for human review**.
-> 4. An **IAM `bedrock:GuardrailIdentifier` condition** → **no inference can run without the guardrail**. This enforces "every inference".
-> - ❌ **Non-streaming `InvokeModel` + hiding tokens in the UI:** no real-time stream filtering.
-> - ❌ **No pre-check:** harmful prompts reach the model.
-> - ❌ **"Code reviews instead of IAM enforcement":** callers could skip the guardrail.
-
 #### Layered architecture
+No single control is enough, so each layer covers the previous layer's weakness.
 
 ```
 Client
@@ -391,8 +401,6 @@ Client
  ▼ ⑨ Observability: invocation logs (KMS), Guardrails metrics, custom metrics, CloudTrail, alarms
 ```
 
-#### Why each layer exists
-
 | Layer | Strength | Weakness covered by next layer |
 | --- | --- | --- |
 | WAF / API GW | Cheap, blocks volume abuse & malformed requests | Not semantic |
@@ -402,6 +410,30 @@ Client
 | Guardrails output | Catches what got through, grounding checks | Only text it can see |
 | Lambda post-validation | Deterministic business rules, schema, allow-lists | Must be maintained |
 | API response filtering | Prevents data leakage of internal fields | — |
+
+> [!IMPORTANT]
+> **🎯 Practice question 69 — symptom checker app (API Gateway → Lambda → Bedrock): layered input and output safety, fewest app changes**
+>
+> Keep API Gateway, and put a **Step Functions** workflow behind it:
+> 1. **Lambda pre-processing:** input sanitisation + **prompt injection checks**.
+> 2. **Guardrails** on prompts **and** responses.
+> 3. **Knowledge base of approved medical content** → grounded answers, fewer hallucinations.
+> 4. **Lambda post-processing:** validate the response (grounded and safe?). Return an **error through API Gateway** if it isn't.
+> - ❌ **WAF keyword rules + disabling Lambda:** can't catch subtle attacks, and it breaks the existing integration.
+> - ❌ **Output-only guardrails + offline S3 review:** no input protection or grounding.
+> - ❌ **Comprehend PII and sentiment + no guardrails + manual log review:** no injection defence and no real-time output safety.
+
+> [!IMPORTANT]
+> **🎯 Practice question 47 — every inference must follow policy: block bad prompts first, filter the stream live, send flagged items to humans**
+>
+> Step Functions workflow:
+> 1. **Lambda pre-check with `ApplyGuardrail` (source `INPUT`)** → harmful prompts are blocked **before** any model call.
+> 2. **`InvokeModelWithResponseStream` with the guardrail attached** → **in-stream** output filtering.
+> 3. **Lambda post-check with `ApplyGuardrail` (source `OUTPUT`)** → flagged items go to an **SQS queue for human review**.
+> 4. An **IAM `bedrock:GuardrailIdentifier` condition** → **no inference can run without the guardrail**. This enforces "every inference".
+> - ❌ **Non-streaming `InvokeModel` + hiding tokens in the UI:** no real-time stream filtering.
+> - ❌ **No pre-check:** harmful prompts reach the model.
+> - ❌ **"Code reviews instead of IAM enforcement":** callers could skip the guardrail.
 
 #### API Gateway response filtering
 - **REST API integration responses / mapping templates (VTL)** transform or strip fields such as the guardrail trace, internal IDs and debug info. They can also **map error types to safe status codes and messages**.
@@ -421,6 +453,18 @@ Client
 - 🎯 **PQ12** Keep **different guardrails or versions per audience** (for example strict public chat vs. internal analyst tool). Pick one at runtime in Lambda based on the caller's role or tenant, or configure it through AppConfig.
 - 🎯 **PQ72** Enforce use centrally with IAM: the `bedrock:GuardrailIdentifier` condition key can **require** a specific guardrail on `InvokeModel`/`Converse` calls. Organisation-level **enforced guardrails** use guardrail resource policies (verify in docs). Governance detail → [Task 3.3](03-task-3.3-governance-compliance.md).
 
+```json
+{
+  "Effect": "Deny",
+  "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+  "Resource": "*",
+  "Condition": {
+    "StringNotEquals": {"bedrock:GuardrailIdentifier": "arn:aws:bedrock:us-east-1:111122223333:guardrail/gr-abc123:3"}
+  }
+}
+```
+*(Pattern for "every call must use the approved guardrail". Verify in docs for the exact ARN/version format the condition expects.)*
+
 > [!WARNING]
 > **🎯 Practice question 72 — healthcare org: central PII governance on every FM call, departments keep their own model parameters**
 >
@@ -433,18 +477,6 @@ Client
 > - If **both** "SCP + boundary" options appear (as in PQ22), choose **boundary = guardrail, SCP = models**.
 > - If the only centralised option is **"Guardrails + SCP + StackSets"** (as here), choose it.
 > - In practice, **organisation-level enforced guardrails** in Bedrock now solve this natively (see the bullet above).
-
-```json
-{
-  "Effect": "Deny",
-  "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-  "Resource": "*",
-  "Condition": {
-    "StringNotEquals": {"bedrock:GuardrailIdentifier": "arn:aws:bedrock:us-east-1:111122223333:guardrail/gr-abc123:3"}
-  }
-}
-```
-*(Pattern for "every call must use the approved guardrail". Verify in docs for the exact ARN/version format the condition expects.)*
 
 ---
 
@@ -467,9 +499,8 @@ Client
 
 #### Detection mechanisms
 1. **Bedrock Guardrails Prompt Attack filter**: set the strength to **HIGH on input**.
-   - **Tag user input** (`guardContent` / input tags) so your **own system prompt** isn't flagged as an attack. Developer instructions and attacks look similar, which is why tagging matters.
-   - With **InvokeModel**, untagged input → **prompt attacks are not filtered at all**.
-   - It **does not evaluate `toolResult`** or tool definitions. For **indirect injection** through tools or RAG, call **ApplyGuardrail** on retrieved or tool content **before** passing it to the model.
+   - **Tag user input** (`guardContent` / input tags) so your **own system prompt** isn't flagged as an attack. Developer instructions and attacks look similar, which is why tagging matters. With InvokeModel, untagged input isn't filtered at all (3.1.1).
+   - For **indirect injection** through tools or RAG, call **ApplyGuardrail** on retrieved or tool content **before** passing it to the model, because the inline guardrail doesn't see `toolResult` (3.1.1).
 2. **Safety classifiers**:
    - Comprehend **prompt-safety classifier** (`SAFE_PROMPT` / `UNSAFE_PROMPT`).
    - A custom **SageMaker-hosted** classifier (for example a fine-tuned DeBERTa/BERT injection detector) for domain-specific attacks.
@@ -503,6 +534,7 @@ Client
 - **Don't trust model output as authorisation**: tools check the *end user's* permissions (token propagation), not "the model said so".
 
 #### Automated adversarial testing (red teaming) workflow
+Detection only stays effective if you keep attacking your own system on every change.
 
 ```
 CodePipeline (on guardrail/prompt/model change)
@@ -531,35 +563,35 @@ CodePipeline (on guardrail/prompt/model change)
 | Block "ignore previous instructions" / DAN-style prompts | Guardrails content filter **Prompt Attack**, strength HIGH, on input |
 | Prompt attack filter isn't catching anything with InvokeModel | User input not wrapped in **input tags** (`amazon-bedrock-guardrails-guardContent_xyz`) |
 | Developer system prompt is being flagged as a prompt attack | Tag only user input (`guardContent`), so the system prompt is excluded |
-| Users try to extract the system prompt | Prompt Attack **Standard tier** (prompt leakage) + no secrets in prompts + canary token |
-| Malicious instructions hidden in a web page/email the agent reads | **Indirect prompt injection** → ApplyGuardrail on tool/retrieved content, treat as data, least-privilege tools, human confirmation |
-| Guardrail attached to Converse doesn't catch harmful tool results | Guardrails don't evaluate `toolResult` / `toolUse.input` → call **ApplyGuardrail** on them |
-| Moderate prompts for a model on SageMaker / third-party API | **ApplyGuardrail** API (no Bedrock model invocation) |
-| Check user input before doing RAG retrieval | ApplyGuardrail `source=INPUT` before `Retrieve` |
 | Bank bot must never give investment advice | **Denied topic** (natural-language definition + sample phrases) |
 | Block competitor names | **Word filter** (exact match) |
 | Guardrail blocks too many legitimate domain terms | Lower content filter strength + rely on denied topics/word filters; test in **detect mode** |
-| Measure what a new guardrail would block without affecting users | Action **NONE (detect)** / shadow mode; ApplyGuardrail on replayed traffic |
+| Multilingual app (e.g. Japanese, German) needs guardrails | **Standard tier** (Classic = EN/FR/ES only) |
+| Moderate prompts for a model on SageMaker / third-party API | **ApplyGuardrail** API (no Bedrock model invocation) |
+| Check user input before doing RAG retrieval | ApplyGuardrail `source=INPUT` before `Retrieve` |
 | Same `stopReason` for block and mask, need to distinguish | Enable trace, check `action` = `BLOCKED` vs `ANONYMIZED` |
+| Blocked prompts visible in logs | Invocation logs store blocked content in plain text → KMS + restricted access, or disable logging |
+| Measure what a new guardrail would block without affecting users | Action **NONE (detect)** / shadow mode; ApplyGuardrail on replayed traffic |
 | Streaming chat needs lowest latency, internal low-risk | Guardrails streaming **async** mode |
 | Streaming responses must mask PII | **Sync** mode (async doesn't support masking) |
+| Pre-filter toxic text cheaply, independent of the FM | **Comprehend `DetectToxicContent`** / prompt-safety classifier |
+| Moderate uploaded images | Guardrails image content filters / **Rekognition DetectModerationLabels** |
+| Numbers in answers must be exact and auditable | **Text-to-SQL** / tool calls on a read-only DB, not generated numbers |
+| Prevent LLM-generated SQL from modifying data | Read-only DB user/IAM role + SELECT-only parser allow-list |
 | RAG answers include facts not in retrieved docs | **Contextual grounding check** (grounding threshold) |
 | Answers are grounded but don't address the question | Contextual grounding **relevance** threshold |
 | Grounding check blocks valid conversational/reasoned answers | **Standard tier** contextual grounding (+ cross-Region guardrail profile), re-tune thresholds |
-| Multilingual app (e.g. Japanese, German) needs guardrails | **Standard tier** (Classic = EN/FR/ES only) |
 | Need provable verification of responses against HR/insurance rules | **Automated Reasoning checks** |
-| Numbers in answers must be exact and auditable | **Text-to-SQL** / tool calls on a read-only DB, not generated numbers |
-| Prevent LLM-generated SQL from modifying data | Read-only DB user/IAM role + SELECT-only parser allow-list |
-| Model must return valid JSON with enum fields | **Forced tool use** with JSON Schema `inputSchema` + Lambda schema validation |
 | Estimate confidence of a free-text answer | Self-consistency (embed N samples, cosine agreement) + retrieval/grounding scores → CloudWatch |
-| Pre-filter toxic text cheaply, independent of the FM | **Comprehend `DetectToxicContent`** / prompt-safety classifier |
-| Moderate uploaded images | Guardrails image content filters / **Rekognition DetectModerationLabels** |
+| Model must return valid JSON with enum fields | **Forced tool use** with JSON Schema `inputSchema` + Lambda schema validation |
 | Strip internal trace fields from API responses | API Gateway **integration response mapping** / Lambda shaping |
 | Prevent data exfiltration via markdown image links | Post-processing URL **allow-list** / don't render external images |
-| Agent could execute destructive action from injected text | Least-privilege per-tool IAM + **user confirmation / return of control** / Step Functions approval |
 | Enforce every model call uses the approved guardrail | IAM condition `bedrock:GuardrailIdentifier` (+ org-level enforced guardrails) |
+| Users try to extract the system prompt | Prompt Attack **Standard tier** (prompt leakage) + no secrets in prompts + canary token |
+| Malicious instructions hidden in a web page/email the agent reads | **Indirect prompt injection** → ApplyGuardrail on tool/retrieved content, treat as data, least-privilege tools, human confirmation |
+| Guardrail attached to Converse doesn't catch harmful tool results | Guardrails don't evaluate `toolResult` / `toolUse.input` → call **ApplyGuardrail** on them |
+| Agent could execute destructive action from injected text | Least-privilege per-tool IAM + **user confirmation / return of control** / Step Functions approval |
 | Regression-test guardrails on each change | CodePipeline + adversarial corpus through ApplyGuardrail, gate on attack success & false-positive rate |
-| Blocked prompts visible in logs | Invocation logs store blocked content in plain text → KMS + restricted access, or disable logging |
 
 ## Flashcards
 
@@ -588,6 +620,28 @@ Jailbreaks, prompt injection, and prompt leakage. Prompt leakage needs Standard 
 </details>
 
 <details>
+<summary><b>Q:</b> Name four differences between the Standard and Classic guardrail tiers.</summary>
+
+Standard has:
+- broad language support (Classic is EN/FR/ES only)
+- prompt leakage detection
+- protection in code elements
+- denied topic definitions up to 1,000 characters (Classic allows 200)
+
+It also handles conversational and reasoning content in grounding checks, and requires cross-Region guardrail inference.
+
+*D3 · Task 3.1 · Tiers*
+</details>
+
+<details>
+<summary><b>Q:</b> You call UpdateGuardrail without `tierConfig` on a Standard-tier grounding policy. What happens?</summary>
+
+The tier resets to CLASSIC, because UpdateGuardrail replaces the whole policy configuration.
+
+*D3 · Task 3.1 · Update gotcha*
+</details>
+
+<details>
 <summary><b>Q:</b> With InvokeModel, prompt attacks aren't being filtered. Why?</summary>
 
 User input isn't wrapped in input tags (`amazon-bedrock-guardrails-guardContent_<suffix>`). Without tags, the Prompt Attack filter doesn't filter those prompts.
@@ -604,11 +658,11 @@ Only the content inside `guardContent` blocks. Other text blocks are skipped. So
 </details>
 
 <details>
-<summary><b>Q:</b> Does a guardrail in `guardrailConfig` evaluate tool results returned to the model?</summary>
+<summary><b>Q:</b> A masked (ANONYMIZE) response and a blocked one both return `stopReason: guardrail_intervened`. How do you tell them apart?</summary>
 
-No. `toolResult` content, tool definitions and `toolUse.input` are not evaluated. To check them, call ApplyGuardrail on that content, which also protects against indirect injection.
+Enable trace and check `sensitiveInformationPolicy` entries for an `action` of ANONYMIZED or BLOCKED. Treat the trace as sensitive, because it contains the unmasked values.
 
-*D3 · Task 3.1 · Tool blind spot*
+*D3 · Task 3.1 · Intervention handling*
 </details>
 
 <details>
@@ -620,11 +674,11 @@ It evaluates text against a guardrail without invoking a model. The request has 
 </details>
 
 <details>
-<summary><b>Q:</b> A masked (ANONYMIZE) response and a blocked one both return `stopReason: guardrail_intervened`. How do you tell them apart?</summary>
+<summary><b>Q:</b> Does a guardrail in `guardrailConfig` evaluate tool results returned to the model?</summary>
 
-Enable trace and check `sensitiveInformationPolicy` entries for an `action` of ANONYMIZED or BLOCKED. Treat the trace as sensitive, because it contains the unmasked values.
+No. `toolResult` content, tool definitions and `toolUse.input` are not evaluated. To check them, call ApplyGuardrail on that content, which also protects against indirect injection.
 
-*D3 · Task 3.1 · Intervention handling*
+*D3 · Task 3.1 · Tool blind spot*
 </details>
 
 <details>
@@ -633,6 +687,25 @@ Enable trace and check `sensitiveInformationPolicy` entries for an `action` of A
 Sync is the default: it buffers and scans chunks before sending them, which adds latency, is safer and supports masking. Async sends chunks immediately and scans in the background, so a harmful chunk can reach the user, and PII masking isn't supported.
 
 *D3 · Task 3.1 · Streaming*
+</details>
+
+<details>
+<summary><b>Q:</b> Which Amazon Comprehend APIs support pre-processing safety filters?</summary>
+
+- `DetectToxicContent` for toxicity labels and scores
+- the prompt-safety classifier through `ClassifyDocument` (SAFE_PROMPT/UNSAFE_PROMPT)
+- `DetectPiiEntities` / `ContainsPiiEntities` for PII
+- `DetectDominantLanguage` for language checks
+
+*D3 · Task 3.1 · Comprehend*
+</details>
+
+<details>
+<summary><b>Q:</b> Why does text-to-SQL appear as an output-safety control?</summary>
+
+The model only translates intent into SQL, and the database computes the answer. Results are deterministic and auditable, with no hallucinated numbers. Enforce SELECT-only queries and read-only credentials.
+
+*D3 · Task 3.1 · Text-to-SQL*
 </details>
 
 <details>
@@ -660,49 +733,11 @@ The relevance score. The answer is grounded in the source but doesn't answer the
 </details>
 
 <details>
-<summary><b>Q:</b> Name four differences between the Standard and Classic guardrail tiers.</summary>
-
-Standard has:
-- broad language support (Classic is EN/FR/ES only)
-- prompt leakage detection
-- protection in code elements
-- denied topic definitions up to 1,000 characters (Classic allows 200)
-
-It also handles conversational and reasoning content in grounding checks, and requires cross-Region guardrail inference.
-
-*D3 · Task 3.1 · Tiers*
-</details>
-
-<details>
-<summary><b>Q:</b> You call UpdateGuardrail without `tierConfig` on a Standard-tier grounding policy. What happens?</summary>
-
-The tier resets to CLASSIC, because UpdateGuardrail replaces the whole policy configuration.
-
-*D3 · Task 3.1 · Update gotcha*
-</details>
-
-<details>
 <summary><b>Q:</b> When do you use Automated Reasoning checks instead of contextual grounding?</summary>
 
 When responses must be logically and provably consistent with formal rules, such as eligibility, policy or compliance logic. Contextual grounding only checks that the response is supported by retrieved text and relevant to the query.
 
 *D3 · Task 3.1 · Automated Reasoning*
-</details>
-
-<details>
-<summary><b>Q:</b> Why does text-to-SQL appear as an output-safety control?</summary>
-
-The model only translates intent into SQL, and the database computes the answer. Results are deterministic and auditable, with no hallucinated numbers. Enforce SELECT-only queries and read-only credentials.
-
-*D3 · Task 3.1 · Text-to-SQL*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you force a model to return output that matches a JSON Schema in Bedrock Converse?</summary>
-
-Define a tool whose `inputSchema` is the JSON Schema, set `toolChoice` to that tool, then validate the result in Lambda and retry with the error message if it fails.
-
-*D3 · Task 3.1 · Structured output*
 </details>
 
 <details>
@@ -721,14 +756,11 @@ Publish the result to CloudWatch and route low-confidence answers to a fallback 
 </details>
 
 <details>
-<summary><b>Q:</b> Which Amazon Comprehend APIs support pre-processing safety filters?</summary>
+<summary><b>Q:</b> How do you force a model to return output that matches a JSON Schema in Bedrock Converse?</summary>
 
-- `DetectToxicContent` for toxicity labels and scores
-- the prompt-safety classifier through `ClassifyDocument` (SAFE_PROMPT/UNSAFE_PROMPT)
-- `DetectPiiEntities` / `ContainsPiiEntities` for PII
-- `DetectDominantLanguage` for language checks
+Define a tool whose `inputSchema` is the JSON Schema, set `toolChoice` to that tool, then validate the result in Lambda and retry with the error message if it fails.
 
-*D3 · Task 3.1 · Comprehend*
+*D3 · Task 3.1 · Structured output*
 </details>
 
 <details>
@@ -776,14 +808,6 @@ A random marker placed in the system prompt. If it appears in the output, the pr
 </details>
 
 <details>
-<summary><b>Q:</b> What metrics should gate an automated red-team pipeline before a new guardrail version is promoted?</summary>
-
-The attack success rate on the adversarial set and the false-positive rate on a benign near-miss set, both within their targets, plus latency. If either regresses, fail the build.
-
-*D3 · Task 3.1 · Red teaming*
-</details>
-
-<details>
 <summary><b>Q:</b> How do you limit damage if an agent is successfully prompt-injected?</summary>
 
 - least-privilege IAM for each tool
@@ -793,6 +817,14 @@ The attack success rate on the adversarial set and the false-positive rate on a 
 - tools that check the end user's permissions instead of trusting the model
 
 *D3 · Task 3.1 · Excessive agency*
+</details>
+
+<details>
+<summary><b>Q:</b> What metrics should gate an automated red-team pipeline before a new guardrail version is promoted?</summary>
+
+The attack success rate on the adversarial set and the false-positive rate on a benign near-miss set, both within their targets, plus latency. If either regresses, fail the build.
+
+*D3 · Task 3.1 · Red teaming*
 </details>
 
 ---

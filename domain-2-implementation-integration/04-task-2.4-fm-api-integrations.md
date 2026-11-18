@@ -10,46 +10,15 @@
 > - **Skill 2.4.4**: Develop intelligent model routing systems to optimize model selection
 
 ## Key points
-- **Five ways to call a Bedrock model**:
-  - **InvokeModel** is synchronous and uses a model-specific body.
-  - **Converse** is synchronous and uses one unified format for all models (tools, system prompt, documents, guardrails).
-  - **ConverseStream** / **InvokeModelWithResponseStream** stream tokens back.
-  - **StartAsyncInvoke** is asynchronous and writes its output to S3 (long jobs such as Nova Reel video).
-  - **CreateModelInvocationJob** is batch inference: JSONL in S3 in, JSONL in S3 out, at a discounted price.
-- **Default to Converse** for new code. You can swap models by changing only the `modelId`, and tool use and multi-turn chat work the same way for every model. Use InvokeModel only when you need a model-specific parameter that Converse doesn't expose (pass it in `additionalModelRequestFields`) or a non-chat model (embeddings, images).
-- **Async decoupling**: API Gateway → **SQS** → Lambda worker → results in DynamoDB or S3 → notify the client (WebSocket, SNS or polling). SQS absorbs spikes. Cap the worker concurrency so you stay under the Bedrock TPM/RPM quotas. Use a **DLQ** for poison messages.
-- **API Gateway REST** gives you **request validators** (JSON Schema models), **usage plans + API keys** (per-client throttle and quota), stage/method throttling, WAF and caching. **HTTP APIs** are cheaper and simpler but have **no request validation and no usage plans**.
-- **Timeouts**: REST integrations default to **29 s**. Regional and private REST APIs can request a higher limit (this may lower your account throttle quota). HTTP API maximum is **30 s**. WebSocket integrations: **29 s**. Lambda maximum: **15 min**. The botocore default **read timeout is 60 s**, so raise it for long generations.
-- **Streaming options**:
-  - 🎯 **PQ32** **API Gateway REST response streaming** (`responseTransferMode = STREAM`, proxy integrations only): up to **15 min**, beats the 29 s timeout and the 10 MB payload limit, but **no VTL, caching or content encoding**.
-  - 🎯 **PQ32** **Lambda function URL** with `RESPONSE_STREAM`.
-  - **API Gateway WebSocket API** for two-way chat.
-  - **SSE** (`text/event-stream`) for one-way token push.
-- **Retryable errors**:
-  - 429 **ThrottlingException** (you hit an account quota)
-  - 503 **ServiceUnavailable** (capacity, not your quota)
-  - 500 **InternalFailure**
-  - **ModelNotReadyException** (imported model still loading)
-  - **ModelTimeoutException**
-  - 529 **overloaded_error**
-- **Don't retry** ValidationException, AccessDenied or ResourceNotFound.
-- **Exponential backoff with jitter** is the AWS-recommended retry approach. botocore `retries={'mode': 'standard' | 'adaptive', 'max_attempts': N}`. **adaptive** adds client-side rate limiting on top of standard.
-- **Degrade gracefully** in this order: retry → Cross-Region Inference profile → fallback model (smaller or different provider) → cached or templated answer → async "we'll email you". See [Task 1.2 · Skill 1.2.3](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md) for CRIS, circuit breakers and AppConfig model switching.
-- **X-Ray** traces requests across API Gateway → Lambda → Bedrock / SQS / DynamoDB. Turn on active tracing and instrument the SDK so each FM call shows up as a timed subsegment.
-- **Routing options**, from simplest to smartest:
-  1. **Static** config map in code or AppConfig.
-  2. **Content-based**: classify the request, then a Step Functions **Choice** state picks a specialised FM.
-  3. **Bedrock Intelligent Prompt Routing**: managed, picks between **2 models in the same family** using predicted quality, with a fallback model and a `responseQualityDifference` setting. **English only**.
-  4. **Metric-based**: CloudWatch latency, error or cost data drives the routing weights.
-  5. **API Gateway mapping templates** or stage variables, for edge-level request rewriting.
-
-> [!WARNING]
-> **🎯 Practice question 32 — API must stream, enforce token limits, retry on timeouts/partial responses, LEAST overhead**
->
-> - **Answer key:** **API Gateway HTTP API → Lambda** (using **Lambda response streaming** through a function URL / HTTP proxy integration) → Bedrock `ConverseStream`. Enforce **token limits (`maxTokens`, input size checks) in Lambda**, and put **retry logic** for model timeouts in Lambda, with API Gateway timeouts as the outer bound.
-> - ❌ **WebSocket API + ECS inference server:** you run the containers yourself, and task restarts work per task, not per request.
-> - ❌ **HTTP API straight to Bedrock with client polling + frontend token limits:** not real streaming, and limits aren't enforced on the server.
-> - ⚠️ **The answer key is out of date:** its rationale says *REST APIs can't stream Lambda responses*. API Gateway now has **REST API response streaming** (`responseTransferMode: STREAM`, see the bullet above, checked against AWS docs). If an exam option contrasts REST and HTTP for streaming, **go with the exam's framing (HTTP API + Lambda streaming)**, but know that REST streaming exists now.
+- **Pick the call by interaction shape:** **Converse** by default (one format for every model; swap by `modelId`), **InvokeModel** for embeddings, images or native-only parameters, the **stream** variants for live UX, **StartAsyncInvoke** when the model itself is async (video), **batch** for large offline jobs → Skill 2.4.1.
+- **Can't answer inside the request?** Go async: API Gateway → **SQS** → Lambda workers with **capped concurrency** → result in DynamoDB/S3 → notify or poll → 2.4.1.
+- **API Gateway is the guard in front of the model:** **REST** for request validation and per-client usage plans (HTTP APIs have neither). API keys **identify** clients; they don't authenticate them → 2.4.1.
+- **Timeouts set the design:** REST integrations default to **29 s** (Regional/private can be raised, which may lower your account throttle quota), HTTP API **30 s** max, Lambda **15 min**, botocore read timeout **60 s**. Longer than that → stream or go async → 2.4.2.
+- **Streaming transport:** 🎯 **PQ32** **REST response streaming** (`STREAM` mode: up to 15 min, but no VTL, caching or compression) or 🎯 **PQ32** **Lambda function URL `RESPONSE_STREAM`** for one-way tokens (SSE); **WebSocket API** when the conversation is two-way → 2.4.2.
+- **Retry only what's transient** (429, 5xx, model timeouts, model not ready) with **exponential backoff + jitter** via the SDK (`standard` / `adaptive`); never retry validation or access errors → 2.4.3.
+- **Degrade gracefully** in this order: retry → CRIS profile → fallback model → cached or templated answer → async "we'll email you" → 2.4.3; CRIS, circuit breakers and AppConfig switching in [Task 1.2 · Skill 1.2.3](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md#skill-123--resilient-ai-systems).
+- **Observe across hops:** X-Ray gives timing per hop; invocation logs give content → 2.4.3.
+- **Routing ladder**, simplest to smartest: static config → content-based (classifier + Step Functions Choice) → **Intelligent Prompt Routing** (managed, 2 models in one family, English only) → metric-based weights → edge rewrites in API Gateway → 2.4.4.
 
 ## Notes
 
@@ -152,6 +121,8 @@ Client ──POST /jobs──► API Gateway ──(AWS service integration: Sen
 | Authorizers | IAM, Cognito, Lambda | IAM, **JWT**, Lambda | IAM, Lambda |
 | Integration timeout | 29 s default; Regional/private can be raised | 30 s max | 29 s |
 
+HTTP APIs are **cheaper and simpler**; choose REST when you need validation, usage plans, WAF, caching or streaming.
+
 **Request validation** rejects bad input *before* you pay for any tokens:
 
 ```json
@@ -189,18 +160,6 @@ Client ──POST /jobs──► API Gateway ──(AWS service integration: Sen
 ### Skill 2.4.2 — Real-time AI interaction systems 🎯 PQ24
 
 > *"Develop real-time AI interaction systems to provide immediate feedback from FM (for example, by using Amazon Bedrock streaming APIs for incremental response delivery, WebSockets or server-sent events to generate text in real time, API Gateway to implement chunked transfer encoding)."*
-
-> [!WARNING]
-> **🎯 Practice question 24 — live call assist: speech-to-text <500 ms, GenAI suggestions, supervisors rate them live, store everything**
->
-> - **Amazon Transcribe *streaming* API** with **small, uniform audio chunks (~100 ms)** → lowest-latency real-time transcription.
-> - **Bedrock `InvokeModelWithResponseStream`** (or `ConverseStream`) → tokens arrive **as they're generated**, so suggestions appear immediately.
-> - **DynamoDB** → low-latency writes for **live supervisor ratings**. Store the call audio, transcripts and suggestions in **S3** for the audit record.
-> - ❌ **Transcribe batch:** post-call only.
-> - ❌ **SQS between steps:** queuing adds delay.
-> - ❌ **Non-streaming `InvokeModel`:** waits for the full response.
-> - ❌ **Bedrock batch inference:** asynchronous, not real time.
-> - ❌ **CloudWatch for ratings:** it's logs and metrics, not an application data store.
 
 #### Why stream
 - **Time to first token (TTFT)** is what users feel. A 20-second answer that starts after 400 ms feels fast; one that appears all at once after 20 s feels broken.
@@ -244,6 +203,20 @@ for event in stream["stream"]:
   - **async** sends chunks straight away and checks in the background, so it's faster but unsafe text can reach the user before the guardrail intervenes.
 - **Errors can arrive mid-stream** after you've already sent HTTP 200. Your client protocol needs an in-band error event (for example an SSE `event: error`).
 
+> [!WARNING]
+> **🎯 Practice question 24 — live call assist: speech-to-text <500 ms, GenAI suggestions, supervisors rate them live, store everything**
+>
+> - **Amazon Transcribe *streaming* API** with **small, uniform audio chunks (~100 ms)** → lowest-latency real-time transcription.
+> - **Bedrock `InvokeModelWithResponseStream`** (or `ConverseStream`) → tokens arrive **as they're generated**, so suggestions appear immediately.
+> - **DynamoDB** → low-latency writes for **live supervisor ratings**. Store the call audio, transcripts and suggestions in **S3** for the audit record.
+> - ❌ **Transcribe batch:** post-call only.
+> - ❌ **SQS between steps:** queuing adds delay.
+> - ❌ **Non-streaming `InvokeModel`:** waits for the full response.
+> - ❌ **Bedrock batch inference:** asynchronous, not real time.
+> - ❌ **CloudWatch for ratings:** it's logs and metrics, not an application data store.
+
+The model now streams; the next question is how those tokens get from your backend to the client.
+
 #### Transport options to the client
 
 | Transport | Direction | AWS implementation | Best for | Limits / gotchas |
@@ -267,16 +240,6 @@ for event in stream["stream"]:
 - **Node.js managed runtimes** support it natively through `awslambda.streamifyResponse()`. Other languages need a custom runtime or the **Lambda Web Adapter** (verify in docs for the current runtime list).
 - Lambda can stream bigger responses than it can buffer (6 MB). The streaming limit is a soft limit (verify in docs for the current number).
 
-> [!IMPORTANT]
-> **🎯 Practice question 50 — responses over 4 MB taking 15–20 s, first response in under 10 s, keep records 10 years**
->
-> - **Lambda response streaming** (function URL `RESPONSE_STREAM`) + Bedrock streaming → the **first tokens arrive within seconds**, even though the full answer takes 15–20 s. Streamed responses can also be larger than the 6 MB buffered-response limit.
-> - **Lambda timeout of 30 s**, which leaves headroom over 20 s of processing.
-> - **Store the complete responses in S3** with a **lifecycle policy (for example to Glacier) for 10-year retention**. Add **Object Lock** if records must be immutable.
-> - ❌ **SQS async:** the customer gets nothing until they poll.
-> - ❌ **API Gateway polling + ElastiCache:** no streaming, so the first byte waits the full 15–20 s.
-> - ❌ **Streaming with a 15 s timeout:** the function is **killed before it finishes**.
-
 ```javascript
 // Node.js Lambda — SSE over function URL (InvokeMode: RESPONSE_STREAM)
 export const handler = awslambda.streamifyResponse(async (event, responseStream) => {
@@ -291,6 +254,16 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   responseStream.end();
 });
 ```
+
+> [!IMPORTANT]
+> **🎯 Practice question 50 — responses over 4 MB taking 15–20 s, first response in under 10 s, keep records 10 years**
+>
+> - **Lambda response streaming** (function URL `RESPONSE_STREAM`) + Bedrock streaming → the **first tokens arrive within seconds**, even though the full answer takes 15–20 s. Streamed responses can also be larger than the 6 MB buffered-response limit.
+> - **Lambda timeout of 30 s**, which leaves headroom over 20 s of processing.
+> - **Store the complete responses in S3** with a **lifecycle policy (for example to Glacier) for 10-year retention**. Add **Object Lock** if records must be immutable.
+> - ❌ **SQS async:** the customer gets nothing until they poll.
+> - ❌ **API Gateway polling + ElastiCache:** no streaming, so the first byte waits the full 15–20 s.
+> - ❌ **Streaming with a 15 s timeout:** the function is **killed before it finishes**.
 
 #### WebSocket chat pattern
 
@@ -314,26 +287,36 @@ Browser ⇄ API GW WebSocket ── $connect (Lambda authorizer, store connectio
 | Long-lived streaming server, custom protocols, gRPC | **ECS/Fargate behind ALB** (configure the idle timeout) |
 | Real-time speech-to-speech | Bidirectional streaming API (`InvokeModelWithBidirectionalStream`, for example Nova Sonic). verify in docs |
 
+> [!WARNING]
+> **🎯 Practice question 32 — API must stream, enforce token limits, retry on timeouts/partial responses, LEAST overhead**
+>
+> - **Answer key:** **API Gateway HTTP API → Lambda** (using **Lambda response streaming** through a function URL / HTTP proxy integration) → Bedrock `ConverseStream`. Enforce **token limits (`maxTokens`, input size checks) in Lambda**, and put **retry logic** for model timeouts in Lambda, with API Gateway timeouts as the outer bound.
+> - ❌ **WebSocket API + ECS inference server:** you run the containers yourself, and task restarts work per task, not per request.
+> - ❌ **HTTP API straight to Bedrock with client polling + frontend token limits:** not real streaming, and limits aren't enforced on the server.
+> - ⚠️ **The answer key is out of date:** its rationale says *REST APIs can't stream Lambda responses*. API Gateway now has **REST API response streaming** (`responseTransferMode: STREAM`, see "API Gateway REST response streaming" above, checked against AWS docs). If an exam option contrasts REST and HTTP for streaming, **go with the exam's framing (HTTP API + Lambda streaming)**, but know that REST streaming exists now.
+
 ### Skill 2.4.3 — Resilient FM systems
 
 > *"Create resilient FM systems to ensure reliable operations (for example, by using the AWS SDK for exponential backoff, API Gateway to manage rate limiting, fallback mechanisms for graceful degradation, AWS X-Ray to provide observability across service boundaries)."*
 
-#### Bedrock error codes and how to handle them (checked against the docs)
+#### Which errors to retry, and the resilience move for each (checked against the docs)
 
-| Error | HTTP | Meaning | Retry? | Action |
-| --- | --- | --- | --- | --- |
-| `ThrottlingException` | 429 | Exceeded **your account quota** (RPM/TPM) | ✅ backoff + jitter | Spread load (CRIS), request a quota increase, Provisioned Throughput / Reserved tier, client-side rate limiting |
-| `ServiceUnavailable` | 503 | **Service capacity**, not your quota | ✅ | Backoff, CRIS, try another Region |
-| `overloaded_error` | 529 | Model temporarily lacks serving capacity | ✅ | Backoff + jitter; honour **`Retry-After`**; avoid synchronised retries |
-| `InternalFailure` / `InternalServerException` | 500 | Server error | ✅ | Backoff |
-| `ModelNotReadyException` | 429 (verify) | Imported / custom model not loaded yet (scaled to zero) | ✅ | The SDK retries this automatically (verify in docs for the count); warm the model up first |
-| `ModelTimeoutException` | 408 | Model took too long | ✅ (maybe with a shorter output) | Lower `maxTokens`, stream, or go async |
-| `ModelErrorException` | 424 | Model-side processing error | ⚠️ limited | Log, fallback |
-| `ModelStreamErrorException` | — | Error **during** a stream | ⚠️ | Resend or fall back; tell the client in-band |
-| `ValidationException` | 400 | Bad input (too many tokens, bad params) | ❌ | Fix the request; truncate or summarise context |
-| `AccessDeniedException` | 403 | IAM/SCP or model access not granted | ❌ | Fix permissions or model access |
-| `ResourceNotFoundException` | 404 | Wrong model ID or Region | ❌ | **Fall back** to another model; keep the model catalogue in sync |
-| `ServiceQuotaExceededException` | 400 | Hard quota | ❌ | Request an increase |
+Resilience starts with knowing which failures are transient. This table is the handling view; the full error taxonomy (meanings, diagnosis, AccessDenied tree) is in [Task 5.2 · Skill 5.2.2](../domain-5-testing-validation-troubleshooting/02-task-5.2-troubleshooting.md#skill-522--diagnose-and-resolve-fm-integration-issues).
+
+| Error (HTTP) | Retry? | Resilience move |
+| --- | --- | --- |
+| `ThrottlingException` (429): **your account quota** (RPM/TPM) | ✅ backoff + jitter | Spread load (CRIS), client-side rate limiting, quota increase, Provisioned Throughput / Reserved tier |
+| `ServiceUnavailable` (503): **service capacity**, not your quota | ✅ | Backoff, CRIS, another Region |
+| `overloaded_error` (529): model temporarily lacks serving capacity | ✅ | Backoff + jitter; honour **`Retry-After`**; avoid synchronised retries |
+| `InternalFailure` / `InternalServerException` (500) | ✅ | Backoff |
+| `ModelNotReadyException` (429, verify): imported/custom model scaled to zero | ✅ SDK retries it automatically (verify in docs for the count) | Warm the model up first |
+| `ModelTimeoutException` (408) | ✅ (maybe with a shorter output) | Lower `maxTokens`, stream, or go async |
+| `ModelErrorException` (424) | ⚠️ limited | Log, fall back |
+| `ModelStreamErrorException` (mid-stream) | ⚠️ | Resend or fall back; tell the client in-band |
+| `ValidationException` (400): too many tokens, bad params | ❌ | Fix the request; truncate or summarise context |
+| `AccessDeniedException` (403) | ❌ | Fix permissions or model access |
+| `ResourceNotFoundException` (404): wrong model ID or Region | ❌ | **Fall back** to another model; keep the model catalogue in sync |
+| `ServiceQuotaExceededException` (400): hard quota | ❌ | Request an increase |
 
 **Network gotcha (checked against the docs)**: NAT gateways, interface VPC endpoints and NLBs **silently drop TCP connections idle for more than 350 s**. Long streams, extended thinking, or a pooled connection reused after a quiet spell can reset or hang. The fix needs **both** `Config(tcp_keepalive=True)` **and** an OS keep-alive below 350 s (for example `sysctl net.ipv4.tcp_keepalive_time=45`).
 
@@ -390,11 +373,9 @@ try primary model (Converse, CRIS profile)
 > - ❌ **API Gateway with several backends + Lambda backoff:** retries alone, no proactive circuit breaking.
 
 #### Observability across service boundaries (X-Ray)
-- Turn on **active tracing** for API Gateway (stage setting), Lambda (`TracingConfig: Active`) and Step Functions. Instrument the SDK, for example with `aws_xray_sdk.core.patch_all()` / `patch(['boto3'])`, Powertools Tracer, or **ADOT / OpenTelemetry**. Each `bedrock-runtime` call then appears as a **subsegment** with its latency and errors.
-- The **trace map** shows client → API GW → Lambda → Bedrock / DynamoDB / SQS, so you can find which hop adds latency or throws errors. SQS → Lambda traces are linked.
-- Add **annotations** (indexed: `modelId`, `tenantId`, `route`) and **metadata** (not indexed: token counts). You can then filter traces by model.
-- Use **CloudWatch Application Signals** and **Transaction Search** for service-level SLOs on top of X-Ray spans. For GenAI- and agent-specific views, use **CloudWatch GenAI observability** and AgentCore Observability (Task 4.x / 5.x).
-- **Bedrock model invocation logging** goes to CloudWatch Logs and/or S3 and records the full prompt and response (an account-level setting). X-Ray gives you timing; invocation logs give you content. You usually need both.
+- For resilience, tracing answers *which hop failed or slowed down*, so you can tell a throttled Bedrock call from a slow retrieval or a retry storm. Turn on **active tracing** end to end; each `bedrock-runtime` call appears as a **subsegment** with its latency and errors, and annotating `modelId` / `route` lets you compare primary and fallback models.
+- X-Ray gives you **timing**; **model invocation logging** gives you **content**. You usually need both.
+- → Full detail (instrumentation, annotations, service map, invocation logging setup): [Task 2.5 · Skill 2.5.6](05-task-2.5-app-integration-dev-tools.md#skill-256--troubleshooting-fm-applications).
 
 ### Skill 2.4.4 — Intelligent model routing systems
 

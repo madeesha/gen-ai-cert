@@ -17,43 +17,15 @@ This file is about **diagnosis**: reading a symptom, finding the root cause and 
 - **Evaluation:** [Task 5.1](01-task-5.1-evaluation-systems.md)
 
 ## Key points
-- **Read `stopReason` first.** Converse returns `end_turn | tool_use | max_tokens | stop_sequence | guardrail_intervened | content_filtered | malformed_model_output | malformed_tool_use | model_context_window_exceeded`.
-  - An answer that is cut off is almost always **`max_tokens`**. Fix it by raising `maxTokens`, asking for a shorter output, or continuing in a follow-up turn.
-  - **`model_context_window_exceeded`** or a **`ValidationException` about input length** means the *input* is too big. Fix it by trimming history, chunking or summarising.
-- **Learn the HTTP codes:**
-
-  | Code | Exception |
-  | --- | --- |
-  | 400 | `ValidationException` |
-  | 403 | `AccessDeniedException` |
-  | 404 | `ResourceNotFoundException` |
-  | 408 | `ModelTimeoutException` |
-  | 424 | `ModelErrorException` / `modelStreamErrorException` |
-  | 429 | `ThrottlingException` **and** `ModelNotReadyException` (the SDK retries this one automatically, up to 5 times) |
-  | 500 | `InternalServerException` |
-  | 503 | `ServiceUnavailableException` |
-  | 529 | `overloaded_error` |
-- **429 vs 503/529.** A 429 `ThrottlingException` means you hit **your account quota**. Fix it with backoff and jitter, a quota increase, CRIS, Provisioned Throughput or the Reserved tier. A 503 or 529 means **the service is short of capacity**. Fix it with backoff and jitter, CRIS or another Region. Retry 4xx validation and access errors **never**; fix the request instead.
-- **"Model ID not supported for on-demand throughput" or ResourceNotFound on newer models** → call through the **inference profile ID** (`us.` / `eu.` / `apac.` / `global.` prefix), not the bare model ID. Also check the **Region**.
-- **AccessDenied on a model** usually has one of these causes:
-  - an IAM policy missing `bedrock:InvokeModel` (Converse) or `bedrock:InvokeModelWithResponseStream` (ConverseStream)
-  - a CRIS call that isn't allowed on **every destination Region's** model ARN plus the inference-profile ARN
-  - an SCP restricting Regions
-  - a missing KMS grant
-  - for Anthropic models, a missing first-time use-case form (`FTUFormNotFilled`)
-  - a pending Marketplace agreement
-- **A 504 from API Gateway at 29 s** means the REST integration timed out. Fix it with **response streaming**, an async pattern (SQS + polling or WebSocket), or a higher timeout quota. **Lambda timeouts** have the same fix: stream, or go async.
-- **Connection resets after idle periods**, or 70+ s "cold" first calls behind a **NAT gateway, interface endpoint or NLB**, come from the fixed **350 s idle timeout**. You need *both* `Config(tcp_keepalive=True)` **and** an OS `tcp_keepalive_time` below 350 s.
-- **Prompt problems call for controlled experiments.** Change **one variable at a time**, compare **Prompt Management versions** on the same golden set, and keep `temperature` low for deterministic tasks. Format drift → **JSON Schema plus a structured output or forced tool use**. Instructions being ignored → move them into the **system prompt**, wrap the data in XML tags, and put the question **last**.
-- **Retrieval triage starts with "was the right chunk retrieved?"**
-  - **No** → it's a *retrieval* problem: chunking, embeddings, metadata filters, sync, hybrid search, reranking.
-  - **Yes, but the answer is wrong** → it's a *generation* problem: the prompt, the context order (lost in the middle), the model.
-- **The embedding model and index dimension must match** at ingestion and at query time. If you change the embedding model, **re-embed everything**. For a KB, that means a **new KB**: the embedding model is fixed once the KB is created.
-- **Prompt maintenance:**
-  - Turn on **model invocation logging**, then query it with **CloudWatch Logs Insights**. Tag requests with `requestMetadata` so you can filter by tenant or prompt version.
-  - Use **X-Ray / ADOT spans** around each step: retrieve, prompt render, invoke, post-process.
-  - **Validate output against a schema** in Lambda, and emit a `SchemaViolation` metric.
-  - **Regression-test** every model or prompt upgrade before switching the alias.
+- **Incomplete answer → read `stopReason` first.** `max_tokens` = the *output* cap was hit (raise `maxTokens`, ask for less, continue). `model_context_window_exceeded` or an input-length `ValidationException` = the *input* is too big. → [5.2.1](#skill-521--resolve-content-handling-issues--pq48)
+- **Input bigger than the window → don't throw data away.** Map-reduce over chunks or RAG over a KB; a bigger-context model or truncation only delays or loses data. → [5.2.1](#skill-521--resolve-content-handling-issues--pq48)
+- **Errors: classify, then retry or fix.** 4xx validation / access / not-found → fix the request, **never retry**. 429 `ThrottlingException` = **your quota**; 503 / 529 = **service capacity**; both → backoff + jitter, CRIS. → [5.2.2](#skill-522--diagnose-and-resolve-fm-integration-issues)
+- **Newer model fails with the bare model ID → use the inference profile ID.** AccessDenied → walk the tree: action, resource (CRIS destination Regions), SCP, model access, KMS, endpoint policy. → [5.2.2](#skill-522--diagnose-and-resolve-fm-integration-issues)
+- **Timeouts: find the layer that cut you off** (API Gateway 29 s → stream or go async; SDK read timeout; 350 s idle on NAT/endpoints → keep-alive in SDK **and** OS). → [5.2.2](#skill-522--diagnose-and-resolve-fm-integration-issues)
+- **Prompt problems → controlled experiments.** Change one variable, compare Prompt Management versions on the same golden set; format drift → schema + structured output or forced tool use. → [5.2.3](#skill-523--troubleshoot-prompt-engineering-problems)
+- **RAG triage: was the right chunk retrieved?** No → retrieval problem (chunking, embeddings, filters, sync, hybrid). Yes → generation problem (prompt, context order, model). → [5.2.4](#skill-524--troubleshoot-retrieval-system-issues)
+- **Query and document embeddings must come from the same model and dimension.** Changing the embedding model means re-embedding everything (a new KB). → [5.2.4](#skill-524--troubleshoot-retrieval-system-issues)
+- **Prompt maintenance is an observability problem:** invocation logs + `requestMetadata` + Logs Insights, X-Ray spans per stage, a schema-violation metric, and regression tests before switching the alias. → [5.2.5](#skill-525--troubleshoot-prompt-maintenance-issues)
 
 ## Notes
 
@@ -61,16 +33,9 @@ This file is about **diagnosis**: reading a symptom, finding the root cause and 
 
 > Resolve content handling issues to ensure that necessary information is processed completely in FM interactions (for example, by using context window overflow diagnostics, dynamic chunking strategies, prompt design optimization, truncation-related error analysis).
 
-> [!IMPORTANT]
-> **🎯 Practice question 48 — huge customer histories: context-length errors + ignored input; use ALL the data, with KBs (choose 2)**
->
-> - ✅ **Chunk + map-reduce:** split the customer data into segments, process each one, then make a **final call that combines the results**. Every part of the data is used.
-> - ✅ **RAG with a Bedrock knowledge base:** index the customer data as embeddings and **retrieve only the relevant parts** for each request. You get the whole dataset without overflowing the context.
-> - ❌ **Raising the context window through `additionalModelRequestFields`:** that field only passes **model-specific inference parameters**. The context window is **fixed by the model**.
-> - ❌ **Put key information first and last + truncate the rest:** **throws data away**.
-> - ❌ **A bigger-context model + longer Lambda timeout:** puts off the failure, and doesn't use KBs.
-
 #### Two kinds of "incomplete" — input vs output
+Converse `stopReason` values: `end_turn | tool_use | max_tokens | stop_sequence | guardrail_intervened | content_filtered | malformed_model_output | malformed_tool_use | model_context_window_exceeded`. Branch on it before trusting any response.
+
 | Symptom | Where it breaks | Signal | Typical fix |
 | --- | --- | --- | --- |
 | Request rejected outright | **Input** too large for the context window | `ValidationException` (400) with a message about input length or too many tokens; or `stopReason = model_context_window_exceeded` | Trim, summarise or chunk the input; use a model with a larger context window |
@@ -105,7 +70,7 @@ full = "".join(parts)
 - **Never** treat a `max_tokens` response as complete. Branch on `stopReason` in code.
 
 #### Context window overflow diagnostics
-1. Log `inputTokens` per request, broken down by component: system prompt, history, retrieved chunks, tool results, user query. A Logs Insights query on the invocation logs (see below), or app-side counters, shows **which part grew**.
+1. Log `inputTokens` per request, broken down by component: system prompt, history, retrieved chunks, tool results, user query. A Logs Insights query on `input.inputTokenCount` in the invocation logs (see 5.2.2), or app-side counters, shows **which part grew**.
 2. Common culprits:
    - unbounded **chat history**
    - **too many or too large RAG chunks** (for example `numberOfResults` = 50 on 1,000-token chunks)
@@ -121,6 +86,8 @@ full = "".join(parts)
    - switch to a model with a larger context window
 
 #### Dynamic chunking strategies for long inputs
+When trimming isn't enough because every part of the input matters, split the work across several calls:
+
 | Pattern | How | Use when |
 | --- | --- | --- |
 | 🎯 **PQ18** **Map-reduce** | Split the doc → summarise or extract per chunk (in parallel) → combine the partial results in a final call | Summarising or extracting from documents larger than the window |
@@ -130,6 +97,19 @@ full = "".join(parts)
 | **Structure-aware split** | Split on headings, pages or table boundaries, never mid-table | Tables and code blocks getting cut in half |
 | **RAG instead of stuffing** | Retrieve only the relevant chunks | Q&A over large docs: cheaper and more accurate than whole-doc stuffing |
 
+- Orchestrate map-reduce with a **Step Functions Distributed Map** (or inline Map) of Lambda + Bedrock calls, then a reduce step. That gives you parallelism, retries per chunk and a visual history of which chunk failed.
+- Chunk **overlap** (10–20%) stops facts from being split across a boundary.
+- These are runtime patterns for **one oversized input**. Choosing a KB's ingestion chunking strategy (fixed, hierarchical, semantic, custom Lambda) is a different decision. → Full detail: [Task 1.5 · Skill 1.5.1](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md#skill-151--document-segmentation-chunking-approaches)
+
+> [!IMPORTANT]
+> **🎯 Practice question 48 — huge customer histories: context-length errors + ignored input; use ALL the data, with KBs (choose 2)**
+>
+> - ✅ **Chunk + map-reduce:** split the customer data into segments, process each one, then make a **final call that combines the results**. Every part of the data is used.
+> - ✅ **RAG with a Bedrock knowledge base:** index the customer data as embeddings and **retrieve only the relevant parts** for each request. You get the whole dataset without overflowing the context.
+> - ❌ **Raising the context window through `additionalModelRequestFields`:** that field only passes **model-specific inference parameters**. The context window is **fixed by the model**.
+> - ❌ **Put key information first and last + truncate the rest:** **throws data away**.
+> - ❌ **A bigger-context model + longer Lambda timeout:** puts off the failure, and doesn't use KBs.
+
 > [!IMPORTANT]
 > **🎯 Practice question 18 — multi-hour transcripts get truncated: process them fully, reliably across many FM calls**
 >
@@ -137,9 +117,6 @@ full = "".join(parts)
 > - ❌ **Same, but "limit overlap for lower latency":** leaves **context gaps at segment boundaries** and lowers reliability. Watch for this near-identical distractor.
 > - ❌ **A bigger context-window model:** multi-hour transcripts can still be too long, and it costs more.
 > - ❌ **Summarise or compress first:** compression **loses details**, so insights get missed.
-
-- Orchestrate map-reduce with a **Step Functions Distributed Map** (or inline Map) of Lambda + Bedrock calls, then a reduce step. That gives you parallelism, retries per chunk and a visual history of which chunk failed.
-- Chunk **overlap** (10–20%) stops facts from being split across a boundary.
 
 #### Prompt design to keep long inputs effective
 - **Lost in the middle:** models attend best to the **start and end** of long contexts. So:
@@ -183,6 +160,15 @@ full = "".join(parts)
 | `overloaded_error` | 529 | Model temporarily over capacity | ✅ Respect `Retry-After` | Backoff, avoid synchronised retries, CRIS |
 | `modelStreamErrorException` (stream event) | 424 | Error **mid-stream** after HTTP 200 | ✅ Re-issue the request | Handle error events inside the stream loop |
 
+Rule of thumb: **4xx client errors → fix the request, don't retry; 429 and 5xx → backoff with jitter.** A 429 `ThrottlingException` is *your* quota; a 503 is the *service's* capacity.
+
+Other errors from the troubleshooting page:
+- **`FTUFormNotFilled` (404):** the Anthropic use-case form hasn't been submitted.
+- **`MPAgreementBeingCreated` (403):** wait about 15 minutes.
+- **`IncompleteSignature` / `InvalidClientTokenId` / `RequestExpired`:** credential, signature or clock-skew problems.
+
+Retry mechanics (standard vs adaptive modes, jitter, circuit breakers) are in [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md).
+
 > [!IMPORTANT]
 > **🎯 Practice question 46 — imported model throws ModelNotReadyException after idle periods; keep it warm at peak, cheap off-peak**
 >
@@ -192,13 +178,6 @@ full = "".join(parts)
 > - ❌ **Constant Step Functions warm-up with parallel paths:** costly and complex.
 > - ❌ **Warm-up 15 minutes before peak + *linear* backoff:** gaps during the peak, and AWS recommends **exponential backoff with jitter**.
 > - *Check the exact inactivity window before eviction in the Custom Model Import docs (verify in docs).*
-
-Other errors from the troubleshooting page:
-- **`FTUFormNotFilled` (404):** the Anthropic use-case form hasn't been submitted.
-- **`MPAgreementBeingCreated` (403):** wait about 15 minutes.
-- **`IncompleteSignature` / `InvalidClientTokenId` / `RequestExpired`:** credential, signature or clock-skew problems.
-
-Retry mechanics (standard vs adaptive modes, jitter, circuit breakers) are in [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md).
 
 #### AccessDeniedException decision tree
 1. **Is the action right?**
@@ -232,7 +211,7 @@ Retry mechanics (standard vs adaptive modes, jitter, circuit breakers) are in [T
 | Extra params | In the body | `additionalModelRequestFields` (for example `top_k`); a bad JSON Pointer in `additionalModelResponseFieldPaths` → 400 |
 | Switching models | Rewrite the body | Change `modelId` (mostly) |
 
-- **Exam pattern:** errors after swapping models with InvokeModel → migrate to **Converse** for a model-agnostic request format.
+- **Exam pattern:** errors after swapping models with InvokeModel → migrate to **Converse** for a model-agnostic request format. Request anatomy and full bodies → [Task 1.3 · Skill 1.3.3](../domain-1-fm-integration-data-compliance/03-task-1.3-data-validation-processing.md#skill-133--formatting-input-data-for-fm-inference).
 - Tool use errors: a `toolResult` must come in the **next user message**, reference the same `toolUseId`, and the tool's **`inputSchema` must be valid JSON Schema**. `stopReason = malformed_tool_use` means the model produced invalid tool input. Retry with a clearer schema, `toolChoice`, or a stronger model.
 - Images and documents: check the format and size limits, and the number of attachments per request (verify in docs for current limits).
 
@@ -258,7 +237,7 @@ Retry mechanics (standard vs adaptive modes, jitter, circuit breakers) are in [T
 | --- | --- | --- | --- |
 | API Gateway REST (default integration timeout) | **29 s** (can be raised for Regional/private APIs via a quota increase; verify in docs) | **504** Gateway Timeout | **REST response streaming**, async (SQS + job ID + polling, or WebSocket), shorter outputs |
 | API Gateway HTTP API | 30 s max | 503/504 | Same as above |
-| Lambda | 15 min max (function setting may be lower) | `Task timed out after X seconds` | Raise the timeout, stream, offload to Step Functions or async |
+| Lambda | 15 min (900 s) max (function setting may be lower) | `Task timed out after X seconds` | Raise the timeout, stream, offload to Step Functions or async |
 | SDK read timeout | botocore default **60 s** `read_timeout` | `ReadTimeoutError` on long generations | Raise `read_timeout` in `Config` for long or extended-thinking calls; stream |
 | NAT GW / interface endpoint / NLB idle | **350 s** fixed | Connection reset; 70 s+ first call after idle | `tcp_keepalive=True` **and** OS `tcp_keepalive_time` < 350 (for example 45) |
 
@@ -277,10 +256,10 @@ brt = boto3.client("bedrock-runtime", config=cfg)
 - Using a control-plane endpoint for runtime calls is a common mix-up: `bedrock` (control plane) vs `bedrock-runtime` (inference) vs `bedrock-agent-runtime` (KB / agents runtime).
 
 #### Error logging and response analysis
-- **Model invocation logging** (off by default) logs the request and response body, token counts and model ID to CloudWatch Logs and/or S3. Setup is in [Task 2.5](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md).
+- **Model invocation logging** (off by default) logs the request and response body, token counts and model ID to CloudWatch Logs and/or S3. Setup is in [Task 2.5 · Skill 2.5.6](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md#skill-256--troubleshooting-fm-applications).
 - Put `requestMetadata` (up to **16** key/value pairs) on Converse calls, for example `{"tenant": "acme", "promptVersion": "7", "feature": "summarise"}`. You can then **filter invocation logs** by them.
 - **CloudTrail** records the API call, principal, `errorCode` and, for CRIS, `additionalEventData.inferenceRegion`. It doesn't record prompt content.
-- CloudWatch `AWS/Bedrock` metrics: `Invocations`, `InvocationLatency`, `InvocationClientErrors`, `InvocationServerErrors`, `InvocationThrottles`, `InputTokenCount`, `OutputTokenCount`. Alarm on error rate and throttles.
+- CloudWatch `AWS/Bedrock` metrics: `Invocations`, `InvocationLatency`, `InvocationClientErrors`, `InvocationServerErrors`, `InvocationThrottles`, `InputTokenCount`, `OutputTokenCount`. Alarm on error rate and throttles. Full metric list → [Task 4.3 · Skill 4.3.2](../domain-4-operational-efficiency-optimization/03-task-4.3-monitoring-observability.md#skill-432--comprehensive-genai-monitoring-and-kpis).
 - Response analysis checklist: `stopReason`, `usage` tokens, `metrics.latencyMs`, guardrail `trace`, `trace.promptRouter.invokedModelId` (which model the router picked), `serviceTier` actually used.
 
 ```sql
@@ -291,14 +270,7 @@ fields @timestamp, modelId, errorCode, identity.arn
 | sort errors desc
 ```
 
-```sql
--- Requests that approached the context limit (input tokens > 150k)
-fields @timestamp, modelId, input.inputTokenCount, output.outputTokenCount, requestMetadata.feature
-| filter input.inputTokenCount > 150000
-| sort input.inputTokenCount desc
-| limit 50
-```
-(Field names follow the invocation log schema. Verify in docs for your log version.)
+(Field names follow the invocation log schema. Verify in docs for your log version.) A query for requests approaching the context limit (filter on `input.inputTokenCount`, add `requestMetadata.feature` to see which feature grew) and other invocation-log queries → [Task 2.5 · Skill 2.5.6](../domain-2-implementation-integration/05-task-2.5-app-integration-dev-tools.md#skill-256--troubleshooting-fm-applications).
 
 ### Skill 5.2.3 — Troubleshoot prompt engineering problems
 
@@ -360,6 +332,23 @@ Wrong / missing answer
 ```
 - Use **Bedrock RAG evaluation** (retrieve-only: context relevance and coverage; retrieve-and-generate: faithfulness, correctness, citation precision) to measure the problem rather than guess. Details in [Task 5.1](01-task-5.1-evaluation-systems.md).
 
+#### Debugging a Bedrock KB query
+```python
+r = bar.retrieve(
+    knowledgeBaseId=KB_ID,
+    retrievalQuery={"text": q},
+    retrievalConfiguration={"vectorSearchConfiguration": {
+        "numberOfResults": 10,
+        "overrideSearchType": "HYBRID",                       # compare SEMANTIC vs HYBRID
+        "filter": {"equals": {"key": "department", "value": "hr"}}}})
+for x in r["retrievalResults"]:
+    print(round(x["score"], 3), x["location"], x.get("metadata", {}).get("department"), x["content"]["text"][:120])
+```
+- Run the same query with and without the filter, and with SEMANTIC vs HYBRID. Look at whether the expected document appears and at which rank.
+- Check **ingestion jobs**: `ListIngestionJobs` / `GetIngestionJob` → `statistics` (scanned, indexed, failed, deleted) and `failureReasons`. Turn on **KB logging** (delivered via CloudWatch vended logs; verify in docs) for per-document ingestion status.
+
+With the failing stage located, match the symptom:
+
 #### Retrieval symptom table
 | Symptom | Likely cause | Diagnosis | Fix |
 | --- | --- | --- | --- |
@@ -393,6 +382,7 @@ Wrong / missing answer
 - **Mixed embedding versions in one index** after a partial migration: the scores aren't comparable. Re-embed fully into a **new index** and swap with an alias (blue/green).
 
 #### Chunking and preprocessing remediation
+Strategy options and their KB settings live in [Task 1.5 · Skill 1.5.1](../domain-1-fm-integration-data-compliance/05-task-1.5-retrieval-mechanisms.md#skill-151--document-segmentation-chunking-approaches). The troubleshooting angle:
 - The Bedrock KB **chunking strategy and parser are fixed after the data source is created** (verify in docs; changing them means a new data source or KB and re-ingestion). Plan experiments on a copy.
 - Remediation order:
   1. **clean** the text (remove headers, footers, navigation)
@@ -413,21 +403,6 @@ Wrong / missing answer
 | Slow end-to-end RAG but fast search | Time spent in generation or reranking | X-Ray spans per stage; reduce context; stream |
 
 Deep OpenSearch tuning is in [Task 1.4](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md) and [Task 4.2](../domain-4-operational-efficiency-optimization/02-task-4.2-application-performance.md).
-
-#### Debugging a Bedrock KB query
-```python
-r = bar.retrieve(
-    knowledgeBaseId=KB_ID,
-    retrievalQuery={"text": q},
-    retrievalConfiguration={"vectorSearchConfiguration": {
-        "numberOfResults": 10,
-        "overrideSearchType": "HYBRID",                       # compare SEMANTIC vs HYBRID
-        "filter": {"equals": {"key": "department", "value": "hr"}}}})
-for x in r["retrievalResults"]:
-    print(round(x["score"], 3), x["location"], x.get("metadata", {}).get("department"), x["content"]["text"][:120])
-```
-- Run the same query with and without the filter, and with SEMANTIC vs HYBRID. Look at whether the expected document appears and at which rank.
-- Check **ingestion jobs**: `ListIngestionJobs` / `GetIngestionJob` → `statistics` (scanned, indexed, failed, deleted) and `failureReasons`. Turn on **KB logging** (delivered via CloudWatch vended logs; verify in docs) for per-document ingestion status.
 
 ### Skill 5.2.5 — Troubleshoot prompt maintenance issues
 
@@ -541,13 +516,11 @@ def parse(text):
 | Stream sometimes ends without a final message | Handle in-stream error events (`modelStreamErrorException`); check for `messageStop`; retry |
 | Connection resets / 70 s first call after idle, behind a NAT gateway | 350 s idle timeout → `tcp_keepalive=True` + OS keep-alive < 350 s |
 | Lambda in a private subnet hangs calling Bedrock | Add a `bedrock-runtime` interface VPC endpoint (private DNS, SG 443) |
+| Need to filter invocation logs by tenant / feature | `requestMetadata` on Converse + Logs Insights |
 | Same input, different answers each time | Lower temperature / topP; tighter instructions; examples |
 | Model returns prose around the JSON | Forced tool use or structured output + JSON Schema validation + retry with error feedback |
 | Prompt worked on the old model version, regressed on the new one | Golden-set comparison; model-specific prompt variant; canary before switching |
 | Need to find which prompt edit caused the regression | Compare Prompt Management versions on the same dataset; diff the versions |
-| Literal `{{variable}}` text appears in model inputs | Template rendering bug → template unit tests; Logs Insights search on the rendered prompts |
-| Trace which RAG stage is slow or failing | X-Ray / ADOT spans per stage with annotations (promptVersion, modelId) |
-| Need to filter invocation logs by tenant / feature | `requestMetadata` on Converse + Logs Insights |
 | RAG answers wrong; is it retrieval or generation? | Call **Retrieve** alone and check whether the right chunk is in the top-k |
 | Exact product codes not found by the KB | Hybrid search (keyword + vector) |
 | Newly uploaded S3 docs not in answers | Ingestion job / sync not run → event-driven `StartIngestionJob` |
@@ -556,6 +529,8 @@ def parse(text):
 | Retrieval quality poor after switching the embedding model for queries only | Query and docs must use the same model → re-embed the corpus |
 | Tables in PDFs retrieved as garbage | FM parsing / Bedrock Data Automation parser; structure-aware chunking |
 | KB answers degrade over months | Content or query drift → refresh the corpus, monitor eval scores, re-evaluate the embedding model |
+| Literal `{{variable}}` text appears in model inputs | Template rendering bug → template unit tests; Logs Insights search on the rendered prompts |
+| Trace which RAG stage is slow or failing | X-Ray / ADOT spans per stage with annotations (promptVersion, modelId) |
 
 ## Flashcards
 
@@ -565,6 +540,14 @@ def parse(text):
 `stopReason`. `max_tokens` means the **output** cap was hit: raise `maxTokens` or continue in a follow-up turn. `model_context_window_exceeded` (or a ValidationException about input length) means the **input** is too large: trim, summarise or chunk it.
 
 *D5 · Task 5.2 · stopReason*
+</details>
+
+<details>
+<summary><b>Q:</b> Need to summarise a 500-page manual with a 200K-token model. Pattern?</summary>
+
+**Map-reduce**: chunk the manual, summarise each chunk in parallel (Step Functions Map + Lambda + Bedrock), then combine the partial summaries in a final call. Use hierarchical summarisation if needed.
+
+*D5 · Task 5.2 · Long documents*
 </details>
 
 <details>
@@ -668,6 +651,19 @@ Pass `requestMetadata` key/value pairs (up to 16) on Converse / ConverseStream, 
 </details>
 
 <details>
+<summary><b>Q:</b> What's the right way to refine a misbehaving prompt?</summary>
+
+1. Reproduce from the logs.
+2. Classify the failure.
+3. Change **one variable**.
+4. Test on the failing case **and** the full regression set.
+5. Save as a new Prompt Management version.
+6. Gate in CI, release through approval, and monitor.
+
+*D5 · Task 5.2 · Refinement*
+</details>
+
+<details>
 <summary><b>Q:</b> A RAG chatbot gives wrong answers. What's the first diagnostic step?</summary>
 
 Call **Retrieve** on its own with the same query and check whether the correct chunk is in the top-k. If not, it's a retrieval problem (chunking, embeddings, filters, sync, hybrid search). If it is, it's a generation problem (prompt, context ordering, model).
@@ -711,6 +707,22 @@ Query and document vectors must come from the **same model**, otherwise they liv
 </details>
 
 <details>
+<summary><b>Q:</b> Literal `{{customer_name}}` text appears in prompts sent to the model. How do you detect and prevent it?</summary>
+
+Detect it with a Logs Insights regex search for `{{…}}` in the rendered prompts, plus a metric filter and alarm. Prevent it with template unit tests in CI that check every variable resolves, including null cases.
+
+*D5 · Task 5.2 · Template testing*
+</details>
+
+<details>
+<summary><b>Q:</b> How do you find which stage of a RAG request (retrieve, rerank, render, invoke, validate) causes latency or errors?</summary>
+
+Instrument with **X-Ray / ADOT**: one span per stage, annotations such as `promptVersion` and `modelId` for filtering, and the service map to locate the slow or failing hop.
+
+*D5 · Task 5.2 · X-Ray*
+</details>
+
+<details>
 <summary><b>Q:</b> Model output intermittently includes prose around the JSON and sometimes renames keys. Best combination of fixes?</summary>
 
 Enforce the schema at generation time with **forced tool use** or **structured output** and low temperature. Validate with JSON Schema in Lambda, emit a `SchemaViolations` metric, and retry once with error feedback.
@@ -729,43 +741,6 @@ Enforce the schema at generation time with **forced tool use** or **structured o
 Compare golden-set scores before and after, using `modelId` and `promptVersion` from the logs.
 
 *D5 · Task 5.2 · Regressions*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you find which stage of a RAG request (retrieve, rerank, render, invoke, validate) causes latency or errors?</summary>
-
-Instrument with **X-Ray / ADOT**: one span per stage, annotations such as `promptVersion` and `modelId` for filtering, and the service map to locate the slow or failing hop.
-
-*D5 · Task 5.2 · X-Ray*
-</details>
-
-<details>
-<summary><b>Q:</b> Literal `{{customer_name}}` text appears in prompts sent to the model. How do you detect and prevent it?</summary>
-
-Detect it with a Logs Insights regex search for `{{…}}` in the rendered prompts, plus a metric filter and alarm. Prevent it with template unit tests in CI that check every variable resolves, including null cases.
-
-*D5 · Task 5.2 · Template testing*
-</details>
-
-<details>
-<summary><b>Q:</b> What's the right way to refine a misbehaving prompt?</summary>
-
-1. Reproduce from the logs.
-2. Classify the failure.
-3. Change **one variable**.
-4. Test on the failing case **and** the full regression set.
-5. Save as a new Prompt Management version.
-6. Gate in CI, release through approval, and monitor.
-
-*D5 · Task 5.2 · Refinement*
-</details>
-
-<details>
-<summary><b>Q:</b> Need to summarise a 500-page manual with a 200K-token model. Pattern?</summary>
-
-**Map-reduce**: chunk the manual, summarise each chunk in parallel (Step Functions Map + Lambda + Bedrock), then combine the partial summaries in a final call. Use hierarchical summarisation if needed.
-
-*D5 · Task 5.2 · Long documents*
 </details>
 
 ---

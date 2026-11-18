@@ -12,36 +12,15 @@
 > - Skill 2.1.7: Model extension frameworks (MCP servers on Lambda vs ECS, MCP client libraries)
 
 ## Key points
-- **Agent = FM + tools + memory + loop.** The loop is *reason → choose tool → act → observe → repeat* until the model stops asking for tools (`stopReason = end_turn`) or a **guard** fires (max iterations, timeout, token budget, cost cap).
-- **Which agent platform?**
-  - **Bedrock Agents**: fully managed (action groups, KBs, memory, guardrails, multi-agent supervisor), with the least code.
-  - **Strands Agents**: open-source, code-first SDK (Python / TypeScript) with `@tool` functions, native MCP, and the multi-agent patterns *agents-as-tools, swarm, graph, workflow, A2A*.
-  - **AgentCore**: runs *any* framework in production (Runtime, Memory, Gateway, Identity, Observability).
-  - **Agent Squad**: classifier-routed multi-agent orchestrator plus a `SupervisorAgent`.
-- **Memory tiers:**
-  - **Short-term** is the conversation or session: the Strands conversation manager, the Bedrock Agents session, or AgentCore Memory *events*.
-  - **Long-term** holds facts, preferences and summaries: Bedrock Agents `SESSION_SUMMARY` memory, or AgentCore Memory *strategies* (semantic, summary, user-preference).
-  - **External state** lives in DynamoDB or S3: workflow state, checkpoints and audit logs.
-- **Deterministic orchestration → Step Functions.** You get explicit ReAct loops (Choice on `stopReason == "tool_use"`), iteration counters, `TimeoutSeconds` / `HeartbeatSeconds`, `Retry` / `Catch`, `Map` for parallel tools, and full audit history.
-- **Express workflows do NOT support `.waitForTaskToken` or `.sync`** and are limited to **5 min**. Human approval therefore needs a **Standard** workflow, which can wait up to **1 year**.
-- **Safeguards stack in layers:**
-  - Step Functions max iterations, plus a Lambda timeout (≤ **900 s**).
-  - IAM *least privilege*, plus **permission boundaries** and **SCPs** to cap what an agent role can ever do.
-  - A **circuit breaker** (DynamoDB-backed closed → open → half-open) around flaky tools or models.
-  - Guardrails on the input and the output.
-- **Human-in-the-loop:**
-  - Step Functions `.waitForTaskToken` with `SendTaskSuccess` / `SendTaskFailure`, triggered from an approval UI behind API Gateway.
-  - Bedrock Agents **user confirmation** (`requireConfirmation`) or **return of control** (`RETURN_CONTROL`).
-  - **Amazon A2I** for confidence-threshold human review.
-- **Tool definitions = name + description + JSON Schema.** The **description is the prompt**: the model selects tools on it. Validate parameters in the tool (JSON Schema, Powertools), return **structured errors** (`toolResult.status = "error"`) so the model can self-correct, and make side-effecting tools **idempotent**.
-- **MCP** is JSON-RPC 2.0.
-  - **Server primitives:** *tools, resources, prompts*.
-  - **Transports:** **stdio** (local subprocess) and **Streamable HTTP**, which replaced HTTP+SSE in 2025 and uses an `Mcp-Session-Id` header.
-  - **Lambda** suits **stateless**, lightweight tools. **ECS / Fargate** (or AgentCore Runtime) suits **stateful, long-running or heavy** tools. **AgentCore Gateway** turns existing Lambda functions, OpenAPI and Smithy APIs into MCP tools.
-- **Model coordination:**
-  - Route each sub-task to a **specialised FM**: a cheap model for classification, a strong model for reasoning, Nova Canvas for images, Titan or Cohere for embeddings.
-  - Combine **ensemble outputs** by voting, an LLM-as-judge or a mixture-of-agents.
-  - Make the model choice **config-driven** (AppConfig) rather than hard-coding it.
+- **Agent = FM + tools + memory + loop**, iterating until the model stops asking for tools or a guard fires. Use the **least autonomy** that solves the problem (2.1.1).
+- **Platform choice:** managed, low-code → **Bedrock Agents**; code-first with native MCP → **Strands**; production hosting for any framework → **AgentCore**; classifier routing across specialist agents → **Agent Squad**; deterministic and auditable → **Step Functions** (2.1.1).
+- **Memory is tiered:** short-term session context, long-term summaries / preferences, and external state in DynamoDB / S3 (2.1.1).
+- **Reasoning pattern:** pure reasoning → CoT; needs tools mid-reasoning → ReAct; long tasks → plan-and-execute. Step Functions makes the ReAct loop explicit and auditable (2.1.2).
+- **Safeguards stack in layers:** stopping conditions, timeouts, least-privilege IAM, circuit breakers and guardrails (2.1.3).
+- **Model coordination:** a specialised FM per sub-task, ensembles for accuracy, config-driven model selection (2.1.4).
+- **Human approval → Step Functions Standard + `.waitForTaskToken`.** Express workflows can't wait for humans (2.1.5).
+- **The tool description is the prompt.** Tight schemas, validate model-generated args, return structured errors so the model can self-correct, make side effects idempotent (2.1.6).
+- **MCP hosting:** stateless and lightweight → **Lambda**; stateful or heavy → **ECS / Fargate**; existing APIs → **AgentCore Gateway** (2.1.7).
 
 ## Notes
 
@@ -66,7 +45,10 @@
 | Route each user message to the best of N specialist agents (intent classification) with shared conversation storage | **AWS Agent Squad** (formerly *Multi-Agent Orchestrator*) |
 | Fully deterministic multi-step process with audit, retries and human approval | **AWS Step Functions** (optionally *calling* agents) |
 
+The sections below take each platform in turn, then look at where state lives outside the agent.
+
 #### Strands Agents: the essentials 🎯 PQ61
+- Open-source, code-first SDK (Python / TypeScript).
 - **Model-driven agent loop.** The `Agent` sends the system prompt, conversation and tool specs to the model. If the model returns `tool_use`, Strands runs the tool, appends the `toolResult` and calls the model again, until `end_turn`.
 - The default model provider is **Amazon Bedrock**. Other providers are pluggable (Anthropic, OpenAI, Ollama, LiteLLM, SageMaker and more).
 - **Tools:**
@@ -74,18 +56,6 @@
   - Class-based tools.
   - The `strands-agents-tools` package (http_request, file ops, calculator, `use_aws`, and others).
   - **MCP tools** via `MCPClient`.
-
-> [!IMPORTANT]
-> **🎯 Practice question 61 — autonomous support: high throughput, multi-step reasoning, persistent sessions, MCP tools, supervisor delegation**
->
-> - **Strands Agents SDK** with the **Amazon Bedrock model provider** (`BedrockModel`):
->   - **built-in session managers** keep the agent's state and memory between interactions
->   - **native MCP** (`MCPClient`) connects external tools
->   - **supervisor → collaborator** patterns (agents-as-tools) handle delegation
->   - the agent loop does the multi-step reasoning
-> - ❌ **Agent Squad + EventBridge:** no native MCP or session managers (per the answer key), and event-driven delegation adds latency.
-> - ❌ **LangChain + DynamoDB + custom MCP servers + custom orchestration:** lots of custom work.
-> - ❌ **Step Functions + ElastiCache + Lambda tools:** orchestration overhead, no MCP, and session memory is all custom.
 
 ```python
 from strands import Agent, tool
@@ -119,16 +89,28 @@ with docs_mcp:
   - `NullConversationManager` keeps everything (verify the default window size in docs).
 - **Persistence = session manager:** `FileSessionManager` and `S3SessionManager` save the agent's messages and state, so a stateless compute instance can resume a session. For managed long-term memory, use the **AgentCore Memory** integration.
 - **Agent state:** `agent.state` is a key-value store that is **not sent to the model**. Use it for app data such as a user ID or cart. `invocation_state` passes config to tools and hooks without exposing it to the LLM.
-- **Hooks:** callbacks before and after model calls and tool calls. Use them to add guardrails, logging, parameter rewriting and tool vetoes.
+- **Hooks, structured output and direct tool calls** customise the loop. See Skill 2.1.6.
 - **Multi-agent patterns** (verified at strandsagents.com):
 
-| Pattern | How it works | Control | Safety knobs |
-| --- | --- | --- | --- |
-| 🎯 **PQ49** **Agents as tools** | An orchestrator agent gets specialist agents in its `tools` list | Orchestrator LLM decides | Orchestrator's own loop limits |
-| **Swarm** (`Swarm`) | A pool of peers *hand off* to each other autonomously, with shared context | Emergent (agents decide) | Max handoffs / iterations, execution and node timeouts, repetitive-handoff detection (verify exact param names) |
-| **Graph** (`GraphBuilder`) | A flowchart of agent nodes. Edges can be conditional, and **cycles are allowed** | Developer defines the topology, the LLM picks the path | `max_iterations`, `node_timeout`, error-routing edges |
-| **Workflow** (`Workflow`) | A fixed **DAG** of tasks. Independent tasks run in parallel, and the whole thing can be exposed as one tool | Deterministic | No cycles; a failure halts dependent tasks |
-| **A2A** | Agents run as separate services and talk over the Agent-to-Agent protocol | Cross-process / cross-team | Network and auth boundaries |
+| Pattern | How it works | Control | Safety knobs | Exam cue |
+| --- | --- | --- | --- | --- |
+| 🎯 **PQ49** **Agents as tools** | An orchestrator agent gets specialist agents in its `tools` list | Orchestrator LLM decides | Orchestrator's own loop limits | "One coordinator delegating to experts" |
+| **Swarm** (`Swarm`) | A pool of peers *hand off* to each other autonomously, with shared context | Emergent (agents decide) | Max handoffs / iterations, execution and node timeouts, repetitive-handoff detection (verify exact param names) | "Unclear which specialist is needed; agents should collaborate and pass work along" |
+| **Graph** (`GraphBuilder`) | A flowchart of agent nodes. Edges can be conditional, and **cycles are allowed** | Developer defines the topology, the LLM picks the path | `max_iterations`, `node_timeout`, error-routing edges | "Known process with branches / loops" |
+| **Workflow** (`Workflow`) | A fixed **DAG** of tasks. Independent tasks run in parallel, and the whole thing can be exposed as one tool | Deterministic | No cycles; a failure halts dependent tasks | "Fixed pipeline with parallel steps" |
+| **A2A** | Agents run as separate services and talk over the Agent-to-Agent protocol | Cross-process / cross-team | Network and auth boundaries | — |
+
+> [!IMPORTANT]
+> **🎯 Practice question 61 — autonomous support: high throughput, multi-step reasoning, persistent sessions, MCP tools, supervisor delegation**
+>
+> - **Strands Agents SDK** with the **Amazon Bedrock model provider** (`BedrockModel`):
+>   - **built-in session managers** keep the agent's state and memory between interactions
+>   - **native MCP** (`MCPClient`) connects external tools
+>   - **supervisor → collaborator** patterns (agents-as-tools) handle delegation
+>   - the agent loop does the multi-step reasoning
+> - ❌ **Agent Squad + EventBridge:** no native MCP or session managers (per the answer key), and event-driven delegation adds latency.
+> - ❌ **LangChain + DynamoDB + custom MCP servers + custom orchestration:** lots of custom work.
+> - ❌ **Step Functions + ElastiCache + Lambda tools:** orchestration overhead, no MCP, and session memory is all custom.
 
 > [!IMPORTANT]
 > **🎯 Practice question 49 — student advisor delegates to scholarship, internship and mental-health agents, keeps context, metrics, minimal code**
@@ -139,19 +121,12 @@ with docs_mcp:
 > - ❌ **Supervisor + Lambda classifier + Step Functions routing:** duplicates what Strands already does.
 > - ❌ **Frontend keyword routing:** brittle, and it doesn't understand context.
 
-- Exam heuristics:
-  - *"Unclear which specialist is needed; agents should collaborate and pass work along"* → **Swarm**.
-  - *"Known process with branches / loops"* → **Graph**.
-  - *"Fixed pipeline with parallel steps"* → **Workflow**.
-  - *"One coordinator delegating to experts"* → **Agents as tools**.
-
 #### AWS Agent Squad
 - Open-source framework (Python and TypeScript) from awslabs. It was formerly **Multi-Agent Orchestrator**.
 - **Flow:** user input → **Classifier** (LLM-based, e.g. a Bedrock or Anthropic classifier) picks the best agent using agent *descriptions* and **conversation history** → the selected **Agent** responds → **Storage** saves the conversation per user, session and agent.
 - **Built-in agents:** Bedrock LLM agent, **Amazon Bedrock Agents** wrapper, **Amazon Lex bot**, **Lambda** agent, Anthropic / OpenAI agents, Chain agent (verify the current list).
 - **Storage:** in-memory (dev), **DynamoDB** (prod), SQL (verify). This is what gives **multi-turn context across agents**: a follow-up like "and what about Tuesday?" is routed correctly because the classifier sees the history.
 - **`SupervisorAgent`:** a lead agent coordinates a *team* using an **agent-as-tools** architecture, with **parallel** sub-agent queries and shared context.
-- Exam cue: *"route each customer message to billing / tech-support / sales specialists and keep context across them"* → **Agent Squad classifier + DynamoDB storage**, or Bedrock Agents multi-agent collaboration in **supervisor-with-routing** mode.
 
 #### Amazon Bedrock Agents: memory and state
 - **Session (short-term):** a `sessionId` keeps conversation context. `idleSessionTTLInSeconds` ends idle sessions (verify the default and maximum).
@@ -203,19 +178,19 @@ with docs_mcp:
 > **🎯 Practice question 4 — Strands + OpenAI agent, >1 h runs, Okta, memory, MOST operationally efficient**
 >
 > - Keep the **existing Strands + OpenAI agent as it is** and **deploy it to AgentCore Runtime**. Add **AgentCore Memory** (context), **AgentCore Identity** (Okta) and the built-in **AgentCore Observability**.
-> - Runtime works with **any framework and any model, including OpenAI**, so no refactor is needed.
-> - Runtime sessions last **up to 8 hours** on microVMs (14 days on Instances), which covers the **"> 1 hour"** requirement. **Lambda stops at 15 minutes** ❌.
-> - **AgentCore Identity** works with **Okta, Microsoft Entra ID or Cognito** for inbound auth, and handles outbound OAuth and API keys to tools.
+> - Why (see the table above): Runtime is framework- and model-agnostic, so **no refactor**; its long sessions cover **"> 1 hour"**; Identity supports **Okta** for inbound auth.
 > - ❌ **Switching to Anthropic models or CrewAI** forces a refactor.
 > - ❌ **ECS/Fargate** means managing containers and scaling yourself.
 > - ❌ **Lambda + custom Okta and memory code** hits the 15-minute limit and adds a lot of custom work.
 > - *Source: AgentCore Runtime developer guide, checked 2026-11-15.*
 
 #### MCP for agent-tool interactions
+Whichever platform runs the agent, MCP is how it reaches shared tools.
 - MCP standardises how agents **discover** (`tools/list`) and **call** (`tools/call`) tools. You write a tool once, and any MCP client can use it: Strands, Amazon Q Developer, Claude Desktop, LangChain adapters, and others.
 - It decouples the **agent** (reasoning) from the **tool** (implementation), so each can be versioned, secured and scaled independently. See Skill 2.1.7.
 
 #### State management outside the agent
+Framework memory covers the conversation; everything else needs an explicit store.
 
 | State | Store |
 | --- | --- |
@@ -313,44 +288,22 @@ Init (iteration=0, messages=[user])
 
 #### Timeouts with Lambda
 - Lambda's maximum timeout is **900 s (15 min)**. Set the function timeout *below* the caller's timeout. With API Gateway → Lambda the integration timeout is **29 s by default**; it can be raised for Regional/private REST APIs via a quota request (verify).
-- **Inside the function:** use `context.get_remaining_time_in_millis()` to abort gracefully. Set **SDK client timeouts and retries** with botocore `Config(read_timeout=..., connect_timeout=..., retries={"max_attempts":..., "mode":"adaptive"})` so a slow model call fails fast instead of consuming the whole Lambda timeout.
+- **Inside the function:** use `context.get_remaining_time_in_millis()` to abort gracefully. Set **SDK client timeouts and retries** with botocore `Config(read_timeout=..., connect_timeout=..., retries={"max_attempts":..., "mode":"adaptive"})` so a slow model call fails fast instead of consuming the whole Lambda timeout (retry config detail: [Task 2.4 · Skill 2.4.3](04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems)).
 - **Long FM jobs** (> 15 min) → Step Functions Standard, Bedrock **batch inference** (async), or the SageMaker **async** endpoint, rather than one long Lambda.
 
 #### IAM resource boundaries
-- **Least privilege on the agent / tool role:**
-  - Allow `bedrock:InvokeModel` / `InvokeModelWithResponseStream` / `Converse` **only on specific model or inference-profile ARNs**.
-  - Each tool Lambda gets its own narrowly scoped role. Give the agent read-only roles where possible.
-- **Permission boundaries** cap the *maximum* permissions of roles that developers or agents can create. This is essential if an agent can create IAM entities or deploy resources.
-- **SCPs** (Organizations) set guardrails across accounts, e.g. deny Bedrock outside approved Regions or deny unapproved model IDs (condition on `bedrock` model ARN).
+The agent angle: assume a prompt-injected agent will try anything its role allows, so the role is the real boundary.
+- **Least privilege:** the agent role may invoke **only specific model or inference-profile ARNs**. Each tool Lambda gets its own narrowly scoped role; give the agent read-only roles where possible.
+- **Permission boundaries** cap the *maximum* permissions of roles that developers or agents can create. This is essential if an agent can create IAM entities or deploy resources. **SCPs** back this up org-wide (e.g. deny unapproved Regions or model IDs).
 - 🎯 **PQ20** **Session policies / scoped-down STS credentials:** the agent assumes a role *on behalf of the user*, with a session policy or **ABAC tags** (`aws:PrincipalTag/tenant`) so it can reach only that tenant's data.
 - **Resource policies:** the Lambda resource policy allows invocation only by the specific Bedrock agent ARN (`aws:SourceArn`) to prevent confused-deputy attacks.
 - **High-impact actions:** require **user confirmation** or human approval (2.1.5), never full autonomy.
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["bedrock:InvokeModel", "bedrock:Converse"],
-  "Resource": [
-    "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
-    "arn:aws:bedrock:us-east-1:111122223333:inference-profile/us.anthropic.claude-*"
-  ]
-}
-```
+- → Full detail: [Task 2.3 · Skill 2.3.3](03-task-2.3-enterprise-integration-architectures.md#skill-233--secure-access-frameworks) (Bedrock least-privilege policies) and [Task 3.3 · Skill 3.3.3](../domain-3-ai-safety-security-governance/03-task-3.3-governance-compliance.md#skill-333--organisational-governance-systems) (SCPs, multi-account governance).
 
 #### Circuit breakers
-- **Purpose:** stop calling a failing dependency (model endpoint, third-party tool), **fail fast**, and let it recover. This prevents retry storms and cascading latency.
-- **States:**
-  - **Closed** (normal; count failures)
-  - → **Open** after N failures in a window (skip the call, return a fallback immediately)
-  - → **Half-open** after a cool-down (let one trial request through; success → closed, failure → open)
-- **AWS implementation:**
-  - A **DynamoDB** table holds circuit state per dependency (`status`, `failureCount`, `openedAt`).
-  - A Step Functions workflow (or a Lambda wrapper) checks the state first. When the circuit is open, it goes to a **fallback** path: alternate model or Region, cached answer, or a "try later" message.
-  - This is a well-known **AWS Step Functions circuit-breaker pattern**. See also Skill 1.2.3 in [Task 1.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md).
-- **Combine with:**
-  - **Exponential backoff + jitter** for transient `ThrottlingException`.
-  - **Cross-Region inference** profiles for capacity.
-  - **Graceful degradation** (smaller model, no-tool answer, human handoff).
+- Wrap flaky **tools and models** the agent depends on in a circuit breaker (**closed → open → half-open**, state in **DynamoDB**, checked by Step Functions or a Lambda wrapper). This stops retry storms and cascading latency inside the agent loop.
+- When the circuit is open, take a **fallback** path: alternate model or Region, cached answer, a **no-tool answer**, human handoff, or a "try later" message. Combine with backoff + jitter and cross-Region inference.
+- → Full detail: [Task 1.2 · Skill 1.2.3](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md#skill-123--resilient-ai-systems) (circuit breaker, CRIS, graceful degradation).
 
 #### Other safeguards
 - **Guardrails** on input (prompt attacks, denied topics) and output (PII, grounding). Apply them to Bedrock Agents via the agent config, or call `ApplyGuardrail` from any framework.
@@ -423,7 +376,7 @@ GenerateDraft (Lambda → Bedrock)
   → Choice(approved?) → Execute action | Revise (loop back with reviewer comments)
 ```
 
-- Requires a **Standard** workflow (Express doesn't support callbacks). Standard runs can last **up to 1 year**.
+- Requires a **Standard** workflow, which can wait **up to 1 year**. **Express workflows don't support `.waitForTaskToken` or `.sync`** and are limited to **5 min**, so they can't wait for humans.
 - Store **who approved what and when** for audit (DynamoDB + CloudTrail).
 - `.waitForTaskToken` also works with **SQS, SNS, ECS** and other integrations: you put the token in the message.
 
@@ -436,7 +389,7 @@ GenerateDraft (Lambda → Bedrock)
 - **Bedrock Agents:**
   - **User confirmation** (`requireConfirmation: ENABLED` on a function): the agent asks the user to confirm before invoking the action.
   - **`AMAZON.UserInput`**: the agent can ask the user clarifying questions.
-  - **Return of control** (below): your app can insert human approval before executing.
+  - **Return of control** (Skill 2.1.6): your app can insert human approval before executing.
 
 #### Feedback collection with API Gateway
 
@@ -517,10 +470,10 @@ UI 👍/👎 + comment → API Gateway (POST /feedback, request validation, Cogn
 - **Timeouts** on downstream calls. **DLQ / on-failure destinations** for async invocations. Structured logging (Powertools logger / tracer → **X-Ray**).
 
 #### Strands API for custom behaviours
-- **`@tool`** functions and class-based tools. A tool can receive a `ToolContext` / `invocation_state` for request-scoped data (user ID, credentials) **not visible to the LLM**.
+- Tools are `@tool` functions or class-based tools (2.1.1). A tool can receive a `ToolContext` / `invocation_state` for request-scoped data (user ID, credentials) **not visible to the LLM**.
 - **Hooks** (before/after invocation, model call and tool call) let you:
   - **validate or rewrite tool inputs**
-  - **block tools** (policy)
+  - **block tools** (policy) and add guardrails
   - add approval prompts
   - log or emit metrics
   - cap tool-call counts
@@ -546,7 +499,7 @@ UI 👍/👎 + comment → API Gateway (POST /feedback, request validation, Cogn
 | --- | --- | --- |
 | **stdio** | The client launches the server as a **subprocess** and exchanges newline-delimited JSON-RPC on stdin / stdout (logs on stderr) | Local tools: IDE, desktop, a dev's machine |
 | **Streamable HTTP** | A single **MCP endpoint** (e.g. `/mcp`) supports POST (client → server) and GET (optional server → client **SSE** stream). The server may return JSON *or* an SSE stream. An optional **`Mcp-Session-Id`** header gives stateful sessions. A `MCP-Protocol-Version` header is required | Remote / shared servers on AWS |
-| ~~HTTP + SSE~~ | The 2024-11-05 transport. **Replaced** by Streamable HTTP | Legacy compatibility only |
+| ~~HTTP + SSE~~ | The 2024-11-05 transport. **Replaced** by Streamable HTTP in 2025 | Legacy compatibility only |
 
 - **Security (spec):** validate the `Origin` header (DNS rebinding), bind local servers to 127.0.0.1, and **authenticate** every connection (the spec uses OAuth 2.1 for HTTP authorisation).
 
@@ -561,7 +514,7 @@ UI 👍/👎 + comment → API Gateway (POST /feedback, request validation, Cogn
 | Front door | **Function URL** or **API Gateway** (+ Cognito / IAM / Lambda authoriser) | ALB (+ Cognito / OIDC), or API Gateway via VPC Link |
 
 - **Alternatives:**
-  - **AgentCore Gateway**: you point it at existing **Lambda functions / OpenAPI / Smithy** APIs and it *becomes* an MCP server, with **inbound OAuth**, outbound credential injection and semantic tool search. Lowest effort for "expose our existing APIs as MCP tools".
+  - **AgentCore Gateway** (see the 2.1.1 table): point it at existing **Lambda functions / OpenAPI / Smithy** APIs and it *becomes* an MCP server, with **inbound OAuth**. Lowest effort for "expose our existing APIs as MCP tools".
   - **AgentCore Runtime**: hosts MCP servers with session isolation.
   - **EKS**: if the platform standard is Kubernetes.
 - **AWS-published MCP servers** (awslabs/mcp: AWS docs, CDK, pricing, Bedrock KB retrieval, and more) can be run locally over stdio or hosted.
@@ -618,25 +571,24 @@ async with streamablehttp_client("https://tools.example.com/mcp",
 | Fixed pipeline, independent steps in parallel, exposed as one tool | Strands **Workflow** |
 | Auditable ReAct loop with retries and a max-steps limit | **Step Functions**: Choice on `stopReason`, iteration counter, Map for tools |
 | Agent loops forever calling the same tool | Max-iteration counter + repetition detection → stop or escalate |
-| Human must approve the action before execution; may take days | Step Functions **Standard** + **`.waitForTaskToken`** + `SendTaskSuccess` from an API Gateway approval endpoint |
-| Express workflow needs a human approval step | ❌ Not supported → use **Standard** |
-| Review low-confidence Textract extractions by humans | **Amazon A2I** human review workflow with an activation condition |
-| Bedrock agent must ask before executing a booking | Function **user confirmation** (`requireConfirmation`) |
-| Action must run in the client app / on-premises after approval | **Return of control** (`RETURN_CONTROL`, reply with `returnControlInvocationResults` + same `invocationId`) |
-| Collect thumbs up/down to improve prompts | **API Gateway** → Lambda → DynamoDB/Firehose → S3; CloudWatch metric per prompt version |
 | Third-party tool API keeps failing and causing retry storms | **Circuit breaker** (DynamoDB state + Step Functions fallback) + backoff with jitter |
 | Agent role must never exceed a defined permission set, even if it creates roles | **IAM permission boundary** (+ SCP org-wide) |
 | Restrict the agent to approved models only | IAM / SCP `Resource` limited to specific **model / inference-profile ARNs** |
-| Model generates invalid tool args | Validate in the Lambda (JSON Schema / Powertools) → return `toolResult` with **`status: "error"`** and a fix-hint |
-| Duplicate refunds when the agent retries | **Idempotency** (Powertools + DynamoDB idempotency key) |
-| Force the model to return JSON matching a schema | Define a tool with that `inputSchema` + **`toolChoice: {tool: {name}}`** |
-| Lightweight, stateless MCP tools with scale-to-zero | **MCP server on Lambda** (Streamable HTTP, stateless) behind a Function URL / API Gateway |
-| MCP server needs a headless browser, large deps, persistent sessions | **MCP server on ECS Fargate** behind an ALB (or AgentCore Runtime) |
-| Local developer tool for an IDE assistant | MCP over **stdio** |
-| The HTTP+SSE MCP transport | Deprecated → **Streamable HTTP** (`Mcp-Session-Id`) |
 | Combine three model answers to improve classification accuracy | Step Functions **Parallel** → majority-vote aggregation Lambda |
 | Cut cost by routing simple prompts to a smaller model in the same family automatically | **Bedrock Intelligent Prompt Routing** |
 | Switch the model for a task without redeploying | Model ID in **AWS AppConfig** (validated, gradual rollout) |
+| Human must approve the action before execution; may take days (or: an Express workflow needs an approval step) | Step Functions **Standard** + **`.waitForTaskToken`** + `SendTaskSuccess` from an API Gateway approval endpoint. ❌ Express doesn't support it |
+| Review low-confidence Textract extractions by humans | **Amazon A2I** human review workflow with an activation condition |
+| Bedrock agent must ask before executing a booking | Function **user confirmation** (`requireConfirmation`) |
+| Collect thumbs up/down to improve prompts | **API Gateway** → Lambda → DynamoDB/Firehose → S3; CloudWatch metric per prompt version |
+| Force the model to return JSON matching a schema | Define a tool with that `inputSchema` + **`toolChoice: {tool: {name}}`** |
+| Action must run in the client app / on-premises after approval | **Return of control** (`RETURN_CONTROL`, reply with `returnControlInvocationResults` + same `invocationId`) |
+| Model generates invalid tool args | Validate in the Lambda (JSON Schema / Powertools) → return `toolResult` with **`status: "error"`** and a fix-hint |
+| Duplicate refunds when the agent retries | **Idempotency** (Powertools + DynamoDB idempotency key) |
+| Local developer tool for an IDE assistant | MCP over **stdio** |
+| The HTTP+SSE MCP transport | Deprecated → **Streamable HTTP** (`Mcp-Session-Id`) |
+| Lightweight, stateless MCP tools with scale-to-zero | **MCP server on Lambda** (Streamable HTTP, stateless) behind a Function URL / API Gateway |
+| MCP server needs a headless browser, large deps, persistent sessions | **MCP server on ECS Fargate** behind an ALB (or AgentCore Runtime) |
 
 ## Flashcards
 
@@ -700,14 +652,6 @@ Enable `memoryConfiguration` with `SESSION_SUMMARY` and pass the same `memoryId`
 </details>
 
 <details>
-<summary><b>Q:</b> Sketch a ReAct loop in Step Functions.</summary>
-
-CallModel (Converse with tools) → Choice: if `stopReason` is `end_turn`, return the answer; if the iteration count is at or above the max, take the fallback path; if it's `tool_use`, go to the Map of tool Lambdas (with Retry/Catch) → append the tool results and increment the iteration → loop back to CallModel.
-
-*D2 · Task 2.1 · ReAct*
-</details>
-
-<details>
 <summary><b>Q:</b> Chain-of-thought vs ReAct vs plan-and-execute?</summary>
 
 - **CoT**: step-by-step reasoning with no tools.
@@ -715,6 +659,14 @@ CallModel (Converse with tools) → Choice: if `stopReason` is `end_turn`, retur
 - **Plan-and-execute**: plan everything first, then run the steps (parallel or cheaper), re-planning on failure.
 
 *D2 · Task 2.1 · Reasoning patterns*
+</details>
+
+<details>
+<summary><b>Q:</b> Sketch a ReAct loop in Step Functions.</summary>
+
+CallModel (Converse with tools) → Choice: if `stopReason` is `end_turn`, return the answer; if the iteration count is at or above the max, take the fallback path; if it's `tool_use`, go to the Map of tool Lambdas (with Retry/Catch) → append the tool results and increment the iteration → loop back to CallModel.
+
+*D2 · Task 2.1 · ReAct*
 </details>
 
 <details>
@@ -727,22 +679,6 @@ CallModel (Converse with tools) → Choice: if `stopReason` is `end_turn`, retur
 5. Repeated identical tool calls, a guardrail intervention, or low confidence → escalate to a human.
 
 *D2 · Task 2.1 · Stopping conditions*
-</details>
-
-<details>
-<summary><b>Q:</b> Why can't a human approval step use an Express workflow?</summary>
-
-Express workflows don't support the `.waitForTaskToken` callback (or `.sync`) and run for at most 5 minutes. Use a Standard workflow instead, which can wait up to 1 year.
-
-*D2 · Task 2.1 · Human approval*
-</details>
-
-<details>
-<summary><b>Q:</b> How does a reviewer's click resume a waiting Step Functions execution?</summary>
-
-The Task state passes `$$.Task.Token` to a Lambda, which stores it and notifies the reviewer. The reviewer's Approve/Reject goes through API Gateway to a Lambda that calls `SendTaskSuccess` or `SendTaskFailure` with that token.
-
-*D2 · Task 2.1 · waitForTaskToken*
 </details>
 
 <details>
@@ -766,11 +702,40 @@ Require a **permission boundary** on any role it creates, and back it with SCPs.
 </details>
 
 <details>
-<summary><b>Q:</b> A tool Lambda receives invalid arguments from the model. What should it return?</summary>
+<summary><b>Q:</b> Name four ways to aggregate outputs from a model ensemble.</summary>
 
-A `toolResult` with `status: "error"` and a structured, model-readable message saying what to fix (and whether it's retryable), so the model can self-correct. Don't throw an unhandled exception.
+1. Majority or weighted voting.
+2. Self-consistency (N samples, then vote).
+3. LLM-as-judge picking the best answer.
+4. Mixture-of-agents fusion, where an aggregator synthesises the answers.
 
-*D2 · Task 2.1 · Tool error handling*
+Also: an agreement check that sends disagreements to a human.
+
+*D2 · Task 2.1 · Ensembles*
+</details>
+
+<details>
+<summary><b>Q:</b> What's the difference between Bedrock Intelligent Prompt Routing and an AppConfig-driven model selection?</summary>
+
+**Intelligent Prompt Routing** is managed and decides per request, choosing between models in the same family based on predicted quality. **AppConfig** is a static, config-driven mapping from task to model, which you can switch without redeploying (with validation and gradual rollout).
+
+*D2 · Task 2.1 · Model selection*
+</details>
+
+<details>
+<summary><b>Q:</b> Why can't a human approval step use an Express workflow?</summary>
+
+Express workflows don't support the `.waitForTaskToken` callback (or `.sync`) and run for at most 5 minutes. Use a Standard workflow instead, which can wait up to 1 year.
+
+*D2 · Task 2.1 · Human approval*
+</details>
+
+<details>
+<summary><b>Q:</b> How does a reviewer's click resume a waiting Step Functions execution?</summary>
+
+The Task state passes `$$.Task.Token` to a Lambda, which stores it and notifies the reviewer. The reviewer's Approve/Reject goes through API Gateway to a Lambda that calls `SendTaskSuccess` or `SendTaskFailure` with that token.
+
+*D2 · Task 2.1 · waitForTaskToken*
 </details>
 
 <details>
@@ -792,6 +757,22 @@ A `toolResult` with `status: "error"` and a structured, model-readable message s
 4. Call `InvokeAgent` again with `sessionState.returnControlInvocationResults` and the same `invocationId` (`inputText` is ignored).
 
 *D2 · Task 2.1 · Return of control*
+</details>
+
+<details>
+<summary><b>Q:</b> A tool Lambda receives invalid arguments from the model. What should it return?</summary>
+
+A `toolResult` with `status: "error"` and a structured, model-readable message saying what to fix (and whether it's retryable), so the model can self-correct. Don't throw an unhandled exception.
+
+*D2 · Task 2.1 · Tool error handling*
+</details>
+
+<details>
+<summary><b>Q:</b> Why add idempotency to agent tools that have side effects?</summary>
+
+Model loops, Step Functions retries and network retries can call the same tool twice. An idempotency key (e.g. Powertools + DynamoDB) stops duplicate refunds or orders.
+
+*D2 · Task 2.1 · Tool reliability*
 </details>
 
 <details>
@@ -826,35 +807,6 @@ A `toolResult` with `status: "error"` and a structured, model-readable message s
 **AgentCore Gateway** with OpenAPI (or Lambda) targets. It exposes one MCP endpoint with inbound auth, outbound credentials and semantic tool search.
 
 *D2 · Task 2.1 · AgentCore Gateway*
-</details>
-
-<details>
-<summary><b>Q:</b> Name four ways to aggregate outputs from a model ensemble.</summary>
-
-1. Majority or weighted voting.
-2. Self-consistency (N samples, then vote).
-3. LLM-as-judge picking the best answer.
-4. Mixture-of-agents fusion, where an aggregator synthesises the answers.
-
-Also: an agreement check that sends disagreements to a human.
-
-*D2 · Task 2.1 · Ensembles*
-</details>
-
-<details>
-<summary><b>Q:</b> What's the difference between Bedrock Intelligent Prompt Routing and an AppConfig-driven model selection?</summary>
-
-**Intelligent Prompt Routing** is managed and decides per request, choosing between models in the same family based on predicted quality. **AppConfig** is a static, config-driven mapping from task to model, which you can switch without redeploying (with validation and gradual rollout).
-
-*D2 · Task 2.1 · Model selection*
-</details>
-
-<details>
-<summary><b>Q:</b> Why add idempotency to agent tools that have side effects?</summary>
-
-Model loops, Step Functions retries and network retries can call the same tool twice. An idempotency key (e.g. Powertools + DynamoDB) stops duplicate refunds or orders.
-
-*D2 · Task 2.1 · Tool reliability*
 </details>
 
 ---

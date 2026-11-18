@@ -11,18 +11,15 @@
 
 ## Key points
 
-- **Document the model → SageMaker Model Cards.** They record intended uses, a **risk rating** (`Unknown` / `Low` / `Medium` / `High`), training details, evaluation results, ethical considerations and caveats. **Every edit except an approval-status change creates a new immutable version.** You can export to **PDF**, share **cross-account**, and the cards are **integrated with Model Registry** model versions.
-- **Track where data came from → Glue Data Catalog** (crawlers register sources, and tables carry metadata and tags), plus **lineage**: SageMaker ML Lineage Tracking for training artifacts, and Amazon DataZone / SageMaker Catalog OpenLineage-based lineage for data pipelines.
-- **Source attribution in answers → metadata on documents** (S3 object metadata or a KB `.metadata.json` sidecar with `source`, `owner`, `classification` and `effective_date`), plus **KB citations** returned by `RetrieveAndGenerate`.
-- **Who called what → CloudTrail.** Bedrock `InvokeModel`, `InvokeModelWithResponseStream`, `Converse` and `ConverseStream` are **management events**, so they're logged by default. `InvokeAgent`, `Retrieve`/`RetrieveAndGenerate`, `InvokeFlow`, `RenderPrompt` and `ApplyGuardrail` are **data events**, which you must turn on with advanced event selectors (and pay extra for).
-- **What was said → model invocation logging** (off by default) to CloudWatch Logs and/or S3, which captures the full prompt and response. CloudTrail **does not** contain prompt or response bodies.
-- **Configuration compliance → AWS Config** rules and conformance packs. **Audit evidence → Audit Manager "AWS Generative AI Best Practices Framework v2"**, which covers Bedrock and SageMaker AI and has **8 principles**, **72 automated + 38 manual controls** and **8 control sets**. Audit Manager is **closed to new customers**.
-- **Organisation-wide guardrails → Organizations SCPs** (for example, deny `bedrock:InvokeModel` except for approved model ARNs, or deny outside approved Regions), **Control Tower** controls, and **Bedrock organisation-level enforced guardrails**.
-- **Compliance reports (SOC, ISO, HIPAA eligibility) → AWS Artifact.** Bedrock is in scope for ISO/IEC 42001 (AI management system) certification. Verify in docs for the current scope list.
-- **Bias drift in production → SageMaker Clarify + Model Monitor** (bias drift monitor). **Data and quality drift → Model Monitor.** For FMs on Bedrock, run **scheduled evaluations** (Bedrock Evaluations or LLM-as-a-judge) and track guardrail intervention rates in CloudWatch.
-- **Automated remediation:** CloudWatch alarm, EventBridge or Config non-compliance → **EventBridge → Lambda / SSM Automation**. Examples: revoke a role, re-attach a guardrail, quarantine an S3 prefix, notify through SNS.
-- **Redaction before storage:** use guardrail PII **masking** (`ANONYMIZE`), CloudWatch Logs **data protection policies** (mask PII in log groups), or Comprehend `DetectPiiEntities` in a Lambda before logging. Keep the raw text only in a locked-down, KMS-encrypted bucket if regulation requires it.
-- **Regulations at awareness level:** EU AI Act (**risk tiers**: unacceptable / high / limited / minimal, plus general-purpose AI obligations), GDPR (lawful basis, right to erasure, data residency), HIPAA (BAA plus HIPAA-eligible services), **ISO/IEC 42001**, and the **NIST AI RMF** (Govern / Map / Measure / Manage).
+- **Governance evidence answers four auditor questions:** what is the model (**Model Cards**), where did the data come from (**Glue Data Catalog + lineage + metadata**), what did it say (**invocation / decision logs**), and are the controls working (**Config, Audit Manager, SCPs, guardrails**) → 3.3.1.
+- **SageMaker Model Cards are the home for model documentation:** versioned (every edit except a status change), risk-rated, exportable to PDF, linked to Model Registry, and generated **programmatically** in the pipeline → 3.3.1.
+- 🎯 **PQ25** **CloudTrail vs invocation logging:** CloudTrail = **who called what** (runtime model calls are management events; KB, agent, flow and guardrail calls are **data events** you must enable). Prompt and response **text** only comes from **model invocation logging** → 3.3.2.
+- **Traceability is a chain of joinable IDs:** catalog table → S3 URI → ingestion job → chunk source URI → citation → requestId → CloudTrail event → 3.3.2.
+- **Preventive vs detective vs evidence:** **SCPs / enforced guardrails** prevent, **Config / Control Tower / Security Hub** detect, **Audit Manager** collects evidence about your workload, **Artifact** gives evidence about AWS → 3.3.3.
+- **Drift:** classic ML bias drift → **Clarify + Model Monitor**; LLM quality and fairness drift → **scheduled Bedrock evaluations / LLM-as-a-judge** plus guardrail intervention metrics → 3.3.4.
+- **Detect → route → act → record:** alarms, Config and GuardDuty → **EventBridge → Lambda / SSM Automation / Step Functions**, with the evidence stored → 3.3.4.
+- **Redact before you store, log what the user saw:** guardrail masking, CloudWatch Logs data protection, Comprehend; raw text only in a locked-down bucket if regulation needs it → 3.3.4.
+- **Regulations at awareness level:** EU AI Act risk tiers, GDPR, HIPAA, ISO/IEC 42001, NIST AI RMF → table in 3.3.1.
 
 ## Notes
 
@@ -160,7 +157,7 @@ fields @timestamp, userId, promptVersion, guardrailAction, modelId
 | **EU AI Act** | Risk-based tiers: **unacceptable** (banned), **high-risk** (conformity assessment, risk management, logging, human oversight, technical documentation), **limited** (transparency: tell users they're talking to AI or that content is AI-generated), **minimal**. Extra obligations for **general-purpose AI** models. | Model Cards (technical documentation), invocation logs (record keeping), human-in-the-loop with A2I or Step Functions, transparency notices in the UI, watermarking (Titan/Nova image watermark) |
 | **GDPR** | Lawful basis, data minimisation, purpose limitation, **right to erasure**, data subject access requests, **cross-border transfers** | Region pinning and **geographic CRIS** profiles, SCP Region deny, PII masking, KB re-sync after deletion, S3 lifecycle |
 | **HIPAA** | PHI requires a **BAA** and **HIPAA-eligible services** | Bedrock is HIPAA-eligible; use encryption, access logging and minimum necessary access |
-| **ISO/IEC 42001** | AI management system standard (the "ISO 27001 for AI") | AWS has 42001 certification for some services (check AWS Artifact) |
+| **ISO/IEC 42001** | AI management system standard (the "ISO 27001 for AI") | AWS has 42001 certification for some services, and Bedrock is in scope (check AWS Artifact; verify in docs for the current scope list) |
 | **NIST AI RMF** | Four functions: **Govern, Map, Measure, Manage**, plus a Generative AI Profile (NIST AI 600-1) | The Well-Architected GenAI Lens and the Audit Manager framework map to these |
 | **SOC 2 / PCI** | Standard controls; reports come from AWS **Artifact** | Artifact, Config conformance packs |
 
@@ -195,7 +192,7 @@ Every hop leaves an identifier you can join on: **catalog table → S3 URI → i
 #### Glue Data Catalog as the source register
 
 - **Register every data source** that feeds the GenAI app, including RAG corpora, fine-tuning datasets and evaluation datasets, as databases and tables, with **table parameters** for owner, PII flag, retention and approval status.
-- **Lake Formation** on top adds fine-grained permissions (column, row and cell level) and **LF-Tags** (tag-based access control). For example, only the RAG ingestion role may read `classification=internal` tables. Data access security itself is covered in [Task 3.2](02-task-3.2-data-security-privacy.md).
+- **Lake Formation** on top of the catalog adds fine-grained and LF-Tag permissions, for example only the RAG ingestion role may read `classification=internal` tables. → Full detail: [Task 3.2 · Skill 3.2.1](02-task-3.2-data-security-privacy.md#skill-321--protected-ai-environments-network-iam-lake-formation-monitoring).
 - **Crawlers on a schedule** detect schema changes and new partitions. Use **EventBridge** events for Glue Data Catalog state changes to trigger governance reviews when a new source appears.
 
 #### Source attribution in FM-generated content
@@ -404,15 +401,17 @@ Guardrail metric / Logs metric filter / Config non-compliance / GuardDuty findin
 
 #### Token-level redaction
 
-| Where | Mechanism | Notes |
-| --- | --- | --- |
-| **Model input/output** | Bedrock Guardrails **sensitive information filter**: PII entity types + **custom regex**, action **`BLOCK`** or **`ANONYMIZE`** (mask, for example `{EMAIL}`) | Works on input and output. `ANONYMIZE` keeps utility. Masking applies to the response returned, and the original may still be in invocation logs, so plan for that |
-| **Logs** | **CloudWatch Logs data protection policy**: managed data identifiers (emails, credit cards, SSNs, ...) + custom identifiers. Data is **masked at ingestion for display**. Only principals with `logs:Unmask` see the original | Audit findings can go to another log group, S3 or Firehose |
-| **Pre-processing** | **Comprehend `DetectPiiEntities` / `ContainsPiiEntities`** in Lambda; replace spans by offset (`BeginOffset`/`EndOffset`) | Fine-grained token or entity replacement before anything is stored or sent |
-| **Data at rest (S3)** | **Amazon Macie** discovers PII in buckets, for example RAG corpora | Detection only; remediate through EventBridge → Lambda |
-| **Streaming** | Guardrail on streaming in **async mode** may release tokens before the check finishes (**sync mode** buffers them) | Use sync mode when redaction is mandatory |
+Redact at every place text is stored or shown. The mechanisms are explained in Task 3.2; for governance, know which one covers which location:
 
-Detailed PII and anonymisation design is in [Task 3.2](02-task-3.2-data-security-privacy.md).
+| Where | Mechanism |
+| --- | --- |
+| **Model input/output** | Bedrock Guardrails **sensitive information filter** (`BLOCK` / `ANONYMIZE`). The original may still be in invocation logs, so plan for that |
+| **Logs** | **CloudWatch Logs data protection policy** (managed data identifiers such as emails, credit cards and SSNs, plus custom identifiers): masked at ingestion for display, only `logs:Unmask` sees originals. Audit findings can go to another log group, S3 or Firehose |
+| **Pre-processing** | **Comprehend `DetectPiiEntities` / `ContainsPiiEntities`** in Lambda, replacing spans by offset before anything is stored or sent |
+| **Data at rest (S3)** | **Amazon Macie** discovery (detection only; remediate through EventBridge → Lambda) |
+| **Streaming** | Guardrail **sync mode** when redaction is mandatory (async may release tokens before the check finishes) |
+
+→ Full detail: [Task 3.2 · Skill 3.2.2](02-task-3.2-data-security-privacy.md#skill-322--privacy-preserving-systems-pii-detection-bedrock-privacy-guardrails-retention).
 
 ```json
 {
@@ -438,8 +437,7 @@ Detailed PII and anonymisation design is in [Task 3.2](02-task-3.2-data-security
 
 #### AI output policy filters
 
-- **Bedrock Guardrails** on output: content filters, denied topics, word filters, PII, **contextual grounding check** (grounding and relevance thresholds), and **Automated Reasoning checks** (formal-logic validation against a policy document). Use a different `blockedOutputsMessaging` per policy.
-- **`ApplyGuardrail` API:** applies the same policies to output from **any** model, including SageMaker, self-hosted or third-party models, or to text at any pipeline stage.
+- **Bedrock Guardrails** on output (content filters, denied topics, word filters, PII, contextual grounding, Automated Reasoning), with a different `blockedOutputsMessaging` per policy. **`ApplyGuardrail`** applies the same policies to output from **any** model or pipeline stage. → Full detail: [Task 3.1 · Skill 3.1.2](01-task-3.1-input-output-safety-controls.md#skill-312--content-safety-frameworks-for-harmful-outputs).
 - **Custom post-filters:** a Lambda after generation enforces deterministic rules that guardrails can't express. Examples: "never quote a price not in the catalogue", "must include a disclaimer for financial advice", JSON Schema validation.
 - **Escalate instead of block** for some categories: route to **human review** (A2I or a Step Functions `waitForTaskToken` step) and log the decision.
 
@@ -458,6 +456,8 @@ Detailed PII and anonymisation design is in [Task 3.2](02-task-3.2-data-security
 | Visualise data lineage across Glue/Redshift pipelines | **Amazon DataZone / SageMaker Catalog lineage** (OpenLineage) |
 | Show users which document each part of the answer came from | KB **citations** (`retrievedReferences` + metadata) |
 | Record document owner, date and classification for attribution | KB **`.metadata.json` sidecar** / S3 object metadata + resource tags |
+| EU AI Act high-risk system: record keeping + human oversight | Invocation/decision logs + Model Cards + human-in-the-loop (A2I / Step Functions) |
+| Data residency for GDPR with CRIS | **Geographic** (for example EU) inference profile + SCP Region restriction |
 | Who invoked which Bedrock model and when | **CloudTrail** (management event, on by default) |
 | Audit `Retrieve`/`RetrieveAndGenerate`, `InvokeAgent` or guardrail evaluations | CloudTrail **data events** (advanced event selectors; extra cost) |
 | Auditor needs the actual prompt and response text | **Model invocation logging** (CloudWatch Logs / S3), **not** CloudTrail |
@@ -465,6 +465,7 @@ Detailed PII and anonymisation design is in [Task 3.2](02-task-3.2-data-security
 | Prove where CRIS inference physically ran | CloudTrail `inferenceRegion` (event logged in the source Region) |
 | SQL queries over years of API activity across the organisation | **CloudTrail Lake** |
 | 🎯 **PQ25** Prove logs weren't tampered with | CloudTrail **log file integrity validation** + S3 **Object Lock** |
+| Suspicious Bedrock activity (guardrail deleted from a new location) | **GuardDuty** (analyses CloudTrail) |
 | Only approved FMs may be used in any account | **SCP** deny `bedrock:InvokeModel*` with `NotResource` allow-list |
 | Guardrail must apply to every invocation across the organisation | **Organisation-level enforced guardrails** / IAM condition `bedrock:GuardrailIdentifier` |
 | Continuously collect audit evidence for GenAI best practices | **Audit Manager: AWS Generative AI Best Practices Framework v2** |
@@ -473,13 +474,10 @@ Detailed PII and anonymisation design is in [Task 3.2](02-task-3.2-data-security
 | Governance baseline for every new account | **AWS Control Tower** controls (preventive, detective, proactive) |
 | Bias metric of a SageMaker model drifting in production | **Model Monitor bias drift** (SageMaker **Clarify**) |
 | LLM output fairness or toxicity over time | Scheduled **Bedrock model evaluation** / LLM-as-a-judge → CloudWatch metrics |
-| Suspicious Bedrock activity (guardrail deleted from a new location) | **GuardDuty** (analyses CloudTrail) |
 | Auto-respond when a Config rule becomes non-compliant | **EventBridge → Lambda / SSM Automation** |
 | Mask PII in CloudWatch log groups, with unmask for authorised staff only | **CloudWatch Logs data protection policy** (`logs:Unmask`) |
 | Mask PII in model responses but keep the answer useful | Guardrails sensitive info filter **`ANONYMIZE`** |
 | Apply output policies to a non-Bedrock model | **`ApplyGuardrail` API** |
-| EU AI Act high-risk system: record keeping + human oversight | Invocation/decision logs + Model Cards + human-in-the-loop (A2I / Step Functions) |
-| Data residency for GDPR with CRIS | **Geographic** (for example EU) inference profile + SCP Region restriction |
 
 ## Flashcards
 
@@ -513,6 +511,46 @@ Run a model card export job (`CreateModelCardExportJob`). It writes a PDF to S3,
 Upload the JSON reports from SageMaker Clarify or Model Monitor to S3 and give their S3 URI. The card parses the metrics.
 
 *D3 · Task 3.3 · Model Cards*
+</details>
+
+<details>
+<summary><b>Q:</b> How do you answer "which training dataset produced the model behind this endpoint?"</summary>
+
+Use SageMaker ML Lineage Tracking. SageMaker Pipelines creates the lineage automatically, and you query it with `LineageQuery`.
+
+*D3 · Task 3.3 · Data lineage*
+</details>
+
+<details>
+<summary><b>Q:</b> What are the EU AI Act risk tiers?</summary>
+
+Unacceptable (banned), high-risk (documentation, logging, human oversight, conformity assessment), limited (transparency duties) and minimal. General-purpose AI models carry extra obligations.
+
+*D3 · Task 3.3 · Regulations*
+</details>
+
+<details>
+<summary><b>Q:</b> What are the four functions of the NIST AI RMF?</summary>
+
+Govern, Map, Measure and Manage. NIST AI 600-1 is its Generative AI Profile.
+
+*D3 · Task 3.3 · Regulations*
+</details>
+
+<details>
+<summary><b>Q:</b> Which service registers data sources and their schemas for traceability?</summary>
+
+The AWS Glue Data Catalog, populated by Glue crawlers. Add Lake Formation LF-Tags for tag-based governance.
+
+*D3 · Task 3.3 · Data lineage*
+</details>
+
+<details>
+<summary><b>Q:</b> How does a RAG app show users the source of each claim?</summary>
+
+Use KB citations from `RetrieveAndGenerate`. They map answer spans to retrieved references (S3 URI or URL plus metadata). Add document metadata such as owner and date through `.metadata.json` sidecars.
+
+*D3 · Task 3.3 · Source attribution*
 </details>
 
 <details>
@@ -556,6 +594,14 @@ CloudTrail logs the event in the source Region. The `inferenceRegion` field show
 </details>
 
 <details>
+<summary><b>Q:</b> How do you prove CloudTrail logs weren't altered?</summary>
+
+Turn on log file integrity validation (digest files), store the logs in S3 with Object Lock, and use an organisation trail.
+
+*D3 · Task 3.3 · Audit logging*
+</details>
+
+<details>
 <summary><b>Q:</b> What is the AWS Audit Manager framework for GenAI, and what does it cover?</summary>
 
 The AWS Generative AI Best Practices Framework v2. It covers Bedrock and SageMaker AI, with 72 automated and 38 manual controls in 8 control sets.
@@ -588,30 +634,6 @@ Artifact gives you AWS's own compliance reports and agreements (SOC, ISO, BAA). 
 </details>
 
 <details>
-<summary><b>Q:</b> Which service registers data sources and their schemas for traceability?</summary>
-
-The AWS Glue Data Catalog, populated by Glue crawlers. Add Lake Formation LF-Tags for tag-based governance.
-
-*D3 · Task 3.3 · Data lineage*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you answer "which training dataset produced the model behind this endpoint?"</summary>
-
-Use SageMaker ML Lineage Tracking. SageMaker Pipelines creates the lineage automatically, and you query it with `LineageQuery`.
-
-*D3 · Task 3.3 · Data lineage*
-</details>
-
-<details>
-<summary><b>Q:</b> How does a RAG app show users the source of each claim?</summary>
-
-Use KB citations from `RetrieveAndGenerate`. They map answer spans to retrieved references (S3 URI or URL plus metadata). Add document metadata such as owner and date through `.metadata.json` sidecars.
-
-*D3 · Task 3.3 · Source attribution*
-</details>
-
-<details>
 <summary><b>Q:</b> A SageMaker credit model's disparate impact is creeping up in production. What detects this?</summary>
 
 A SageMaker Model Monitor bias drift monitor, powered by Clarify. It needs Data Capture and ground-truth labels, and emits CloudWatch metrics.
@@ -625,6 +647,14 @@ A SageMaker Model Monitor bias drift monitor, powered by Clarify. It needs Data 
 Run Bedrock or SageMaker model evaluations on a schedule, using built-in toxicity and stereotyping datasets or LLM-as-a-judge. Publish the scores as CloudWatch metrics with alarms.
 
 *D3 · Task 3.3 · Continuous monitoring*
+</details>
+
+<details>
+<summary><b>Q:</b> What's the standard automated remediation pattern for a GenAI policy violation?</summary>
+
+The detector (CloudWatch alarm, Config rule or GuardDuty) feeds an EventBridge rule. The rule calls Lambda or SSM Automation (or Step Functions for human approval) and notifies through SNS. The outcome is recorded as evidence.
+
+*D3 · Task 3.3 · Remediation*
 </details>
 
 <details>
@@ -649,38 +679,6 @@ BLOCK rejects the whole input or output and returns the blocked message. ANONYMI
 Call the `ApplyGuardrail` API on the input and output text.
 
 *D3 · Task 3.3 · Output policy filters*
-</details>
-
-<details>
-<summary><b>Q:</b> What's the standard automated remediation pattern for a GenAI policy violation?</summary>
-
-The detector (CloudWatch alarm, Config rule or GuardDuty) feeds an EventBridge rule. The rule calls Lambda or SSM Automation (or Step Functions for human approval) and notifies through SNS. The outcome is recorded as evidence.
-
-*D3 · Task 3.3 · Remediation*
-</details>
-
-<details>
-<summary><b>Q:</b> What are the EU AI Act risk tiers?</summary>
-
-Unacceptable (banned), high-risk (documentation, logging, human oversight, conformity assessment), limited (transparency duties) and minimal. General-purpose AI models carry extra obligations.
-
-*D3 · Task 3.3 · Regulations*
-</details>
-
-<details>
-<summary><b>Q:</b> What are the four functions of the NIST AI RMF?</summary>
-
-Govern, Map, Measure and Manage. NIST AI 600-1 is its Generative AI Profile.
-
-*D3 · Task 3.3 · Regulations*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you prove CloudTrail logs weren't altered?</summary>
-
-Turn on log file integrity validation (digest files), store the logs in S3 with Object Lock, and use an organisation trail.
-
-*D3 · Task 3.3 · Audit logging*
 </details>
 
 ---

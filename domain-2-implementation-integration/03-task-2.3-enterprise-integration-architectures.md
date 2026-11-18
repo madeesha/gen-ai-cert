@@ -11,29 +11,16 @@
 > - **Skill 2.3.5:** CI/CD pipelines and GenAI gateway architectures
 
 ## Key points
-- **Loose coupling is the default answer.** Put **SQS** between producers and FM calls to absorb bursts, protect quotas and retry. Use **EventBridge** for content-based routing to several GenAI consumers, **SNS** for simple fan-out, and **Step Functions** for multi-step orchestration with human or approval steps.
-- **Legacy systems:** wrap SOAP, mainframe or on-prem APIs behind **API Gateway** with **VPC Link** (private integration through an NLB/ALB). The GenAI service calls a clean REST facade and never talks to the legacy protocol directly.
-- **Data sync for RAG and context:** **DMS CDC** for databases, **AppFlow** for SaaS (Salesforce, ServiceNow, Zendesk), **EventBridge Pipes** for point-to-point stream → target with filter and enrichment, and **S3 events → KB `StartIngestionJob`** to keep vector stores fresh.
-- **Webhooks:** **Lambda function URL** or API Gateway → validate the HMAC signature → **ack fast (200)** → push to SQS or EventBridge → process with the FM asynchronously. Never call a slow FM inside the webhook response path.
-- **Least-privilege FM access:** scope `bedrock:InvokeModel` / `InvokeModelWithResponseStream` / `Converse*` to **specific foundation-model and inference-profile ARNs**. Foundation-model ARNs have **no account ID**: `arn:aws:bedrock:<region>::foundation-model/<id>`.
-- **Bedrock supports ABAC** (`aws:ResourceTag`, `aws:RequestTag`, `aws:TagKeys`) and **resource-based policies for guardrails**. Use tagged **application inference profiles** to grant per-team access and allocate cost.
-- **Identity:** workforce users come in through **IAM Identity Center** (SAML 2.0 / SCIM from Okta or Entra ID). Customer users come in through **Cognito** user pools, plus identity pools for temporary AWS credentials. **Trusted identity propagation** passes the end-user identity to services such as Q Business and Redshift for per-user data access.
-- **Private connectivity:** use **interface VPC endpoints (PrivateLink)**: `bedrock`, `bedrock-runtime`, `bedrock-agent`, `bedrock-agent-runtime` (plus FIPS variants). Attach **endpoint policies** to restrict actions, and add `aws:SourceVpce` conditions to identity policies. On-prem traffic reaches them over **Direct Connect / Site-to-Site VPN**.
-- **Data residency:** **geographic CRIS** (`us.`, `eu.`, `apac.`) keeps processing inside the geography. **Global CRIS** (`global.`) routes worldwide for about 10% savings, so avoid it when residency rules apply. Data must never leave the country → **in-Region on-demand** only + **SCP `aws:RequestedRegion`**. Data must stay on-prem → self-hosted model on **Outposts** (Bedrock does not run on Outposts).
+- **Mental model:** an FM is a slow, variable, quota-bound dependency. Call it synchronously only when a user is waiting; otherwise decouple with **SQS** (buffer), **EventBridge** (route to many consumers) or **Step Functions** (multi-step, approvals) → Skill 2.3.1.
+- **Legacy systems → a facade.** The GenAI code calls a clean REST API (API Gateway + **VPC Link**, or a Lambda adapter) and never speaks SOAP or mainframe protocols → 2.3.1.
+- **Keeping FM context fresh:** pick the sync tool by source: **DMS CDC** (databases), **AppFlow** (SaaS), **EventBridge Pipes** (stream → enrich → target), **S3 events → KB `StartIngestionJob`** (documents) → 2.3.1.
+- **Webhooks:** verify the signature → **ack fast** → enqueue → FM work asynchronously. Many senders with different auth methods → **API Gateway + Lambda authorisers** in one place → 2.3.2.
+- **Identity by audience:** employees → **IAM Identity Center**; customers → **Cognito**; workloads → IAM roles; per-user data access → **trusted identity propagation**; cross-account agents → `AssumeRole` with **session tags** → 2.3.3.
+- **Least privilege:** scope invoke actions to specific **foundation-model / inference-profile ARNs**, use **ABAC on tagged application inference profiles**, require a guardrail with `bedrock:GuardrailIdentifier`, and keep traffic on **PrivateLink** with `aws:SourceVpce` → 2.3.3.
+- **Residency ladder:** global CRIS (cheapest, anywhere) → geographic CRIS (stay in the geography) → in-Region on-demand + SCP (stay in one country) → self-hosted model on **Outposts** (stay on-premises; Bedrock doesn't run there) → 2.3.4.
 - 🎯 **PQ71** **Edge:** **Wavelength** = 5G carrier edge (ultra-low latency to mobile devices) · **Local Zones** = metro proximity · **Outposts** = AWS racks in your data centre (residency or local processing).
-- **CI/CD for GenAI:** CodePipeline stages are source → build (lint, unit tests, **SAST/SCA scans**, IaC scan) → **prompt/eval regression tests** (golden datasets, Bedrock Evaluations or LLM-as-judge thresholds) → deploy (canary via Lambda aliases + CodeDeploy, or prompt versions + aliases) → automatic **rollback** on CloudWatch alarm.
-- **GenAI gateway** = one central abstraction layer that all teams call: API Gateway (auth, **usage plans / API keys** per team, throttling) → Lambda/ECS router → Bedrock or other providers. It enforces **guardrails**, **invocation logging**, **cost attribution** and **model allow-lists** in one place.
-
-> [!IMPORTANT]
-> **🎯 Practice question 71 — patient data must stay on-premises per country, <100 ms diagnostics at remote clinics, cloud FMs for analytics**
->
-> - **AWS Outposts** in the countries with residency rules → **store and process patient data on-premises** using the **same AWS APIs and tools**, so development works the same in every environment.
-> - **AWS Wavelength** (compute at the 5G carrier edge) near the clinics → **real-time inference under 100 ms**.
-> - **Cloud FMs in the Region** analyse **aggregated or non-sensitive** data at scale.
-> - ❌ **Global Accelerator + DataSync to S3 + one central endpoint:** copies the data out of the country, and too much latency.
-> - ❌ **EC2 GPUs in Regions + copying data to the cloud:** breaks residency, and too much latency.
-> - ❌ **Self-managed EC2/EBS per country + Systems Manager + CSV exports:** heavy operations, and no edge.
-> - 🔁 **Cue:** *"data must stay on-premises"* → **Outposts**. *"ultra-low latency to mobile or 5G devices"* → **Wavelength**. *"metro proximity"* → **Local Zones**.
+- **GenAI CI/CD:** version everything (prompts, guardrails, agent aliases, model IDs), gate on **threshold-based evaluations**, and roll back by **repointing an alias** → 2.3.5.
+- **GenAI gateway:** one central layer for auth, per-team quotas, model allow-list, guardrails, logging and cost attribution; enforce it by **denying direct `bedrock:Invoke*`** to everyone but the gateway role → 2.3.5.
 
 ## Notes
 
@@ -42,6 +29,8 @@
 > *Create enterprise connectivity solutions to seamlessly incorporate FM capabilities into existing enterprise environments (for example, by using API-based integrations with legacy systems, event-driven architectures to implement loose coupling, data synchronization patterns).*
 
 #### Integration styles: what to use when
+
+**Why it matters for GenAI:** FM calls are slow, variable and quota-bound. Decoupling stops one slow model from blocking upstream systems, lets you **buffer bursts** under Bedrock TPM/RPM quotas, and lets you add new AI consumers without touching producers. Pick the style by whether someone is waiting and how many consumers react.
 
 | Style | AWS services | Use when | Watch out for |
 | --- | --- | --- | --- |
@@ -63,7 +52,6 @@
 - **Agent-to-legacy:** expose legacy operations as **tools** (Bedrock Agents action groups with OpenAPI schemas, or MCP servers / AgentCore Gateway converting APIs to MCP tools). See [Task 2.1](01-task-2.1-agentic-ai-tool-integrations.md).
 
 #### Event-driven architecture for loose coupling
-- **Why it matters for GenAI:** FM calls are slow, variable and quota-bound. Decoupling stops one slow model from blocking upstream systems, lets you **buffer bursts** under Bedrock TPM/RPM quotas, and lets you add new AI consumers without touching producers.
 - **SQS patterns**
   - Producer → SQS → Lambda (event source mapping, `batchSize`, `maximumConcurrency` to cap concurrent FM calls) → Bedrock.
   - **DLQ** + `maxReceiveCount` for poison messages (for example oversized prompts or content blocked by guardrails).
@@ -106,29 +94,11 @@
 
 > *Develop integrated AI capabilities to enhance existing applications with GenAI functionality (for example, by using API Gateway to implement microservice integrations, Lambda functions for webhook handlers, Amazon EventBridge to implement event-driven integrations).*
 
-> [!WARNING]
-> **🎯 Practice question 38 — webhooks from several ticketing systems (different auth methods), 100 concurrent requests <500 ms, 99.9% multi-Region**
->
-> - **API Gateway REST API (Regional endpoint) → Lambda → Bedrock** for sentiment and the auto-reply.
-> - **Lambda authorisers** check **each ticketing system's own webhook auth** (HMAC signatures, API tokens, basic auth, JWT) **in one central place**, so the ticketing systems don't need any changes and you don't get auth failures.
-> - **DynamoDB global tables** store the results across Regions for 99.9% availability. API Gateway + Lambda handle spikes of 250k tickets a day.
->
-> Traps:
-> - ❌ **Lambda function URLs:** support only **one auth type, `AWS_IAM` or `NONE`**. `NONE` + HMAC code in every function means scattered auth logic and a higher risk of failures.
-> - ❌ **WebSocket API:** built for persistent two-way connections, not webhook intake, and it has no support for mixed auth methods.
-> - ❌ **SQS + Comprehend + Lex:** doesn't use **Bedrock**, and queueing adds latency.
+With the integration style chosen, this skill is about where GenAI plugs into an existing application: as a callable microservice, as a webhook receiver, or as an event subscriber.
 
 #### Adding GenAI as a microservice
 - Package each AI capability (summarise, classify, extract, draft reply, semantic search) as its own **microservice** behind API Gateway. Existing apps call `POST /ai/summarise` and never need the Bedrock SDK, model IDs or prompts.
-- **REST API vs HTTP API vs WebSocket**
-
-| Need | Choose |
-| --- | --- |
-| Request validation (JSON schema models), API keys + **usage plans**, WAF, caching, VTL transforms, private endpoints, **response streaming** | **REST API** |
-| Lowest cost and latency, JWT authoriser (Cognito/OIDC), simple proxy | **HTTP API** |
-| Bidirectional, server push of tokens to the client | **WebSocket API** |
-
-- Streaming responses to the client are covered in [Task 2.4](04-task-2.4-fm-api-integrations.md) and [Task 2.5](05-task-2.5-app-integration-dev-tools.md).
+- **API type:** **REST API** for request validation, usage plans, WAF, caching, VTL, private endpoints and response streaming; **HTTP API** for lowest cost and latency with a JWT authoriser (Cognito/OIDC) and simple proxy; **WebSocket API** for two-way server push of tokens. → Full comparison: [Task 2.4 · Skill 2.4.1](04-task-2.4-fm-api-integrations.md#skill-241--flexible-model-interaction-systems); streaming in [Skill 2.4.2](04-task-2.4-fm-api-integrations.md#skill-242--real-time-ai-interaction-systems--pq24); front-door choice in [Task 2.5 · Skill 2.5.1](05-task-2.5-app-integration-dev-tools.md#skill-251--fm-api-interfaces-for-genai-workloads).
 - **Backends:** Lambda (spiky, short work: watch the 15-min max and API Gateway timeout), **ECS/Fargate** (long-running, streaming, MCP servers), or direct **AWS service integration** (API Gateway → Step Functions `StartExecution` / SQS `SendMessage` with no Lambda).
 - **Async job API pattern:** `POST /jobs` → API Gateway → SQS/Step Functions → return `202 + jobId` → client polls `GET /jobs/{id}` (status in DynamoDB) or gets a callback via WebSocket or webhook. Use it for any FM task that may exceed the API timeout.
 - **Sidecar enrichment:** existing CRUD flows emit events. GenAI services subscribe and write results back (for example an `ai_summary` column) without changing the original service's code path.
@@ -158,6 +128,18 @@ def handler(event, _):
     return {"statusCode": 200}
 ```
 
+> [!WARNING]
+> **🎯 Practice question 38 — webhooks from several ticketing systems (different auth methods), 100 concurrent requests <500 ms, 99.9% multi-Region**
+>
+> - **API Gateway REST API (Regional endpoint) → Lambda → Bedrock** for sentiment and the auto-reply.
+> - **Lambda authorisers** check **each ticketing system's own webhook auth** (HMAC signatures, API tokens, basic auth, JWT) **in one central place**, so the ticketing systems don't need any changes and you don't get auth failures.
+> - **DynamoDB global tables** store the results across Regions for 99.9% availability. API Gateway + Lambda handle spikes of 250k tickets a day.
+>
+> Traps:
+> - ❌ **Lambda function URLs:** support only **one auth type, `AWS_IAM` or `NONE`**. `NONE` + HMAC code in every function means scattered auth logic and a higher risk of failures.
+> - ❌ **WebSocket API:** built for persistent two-way connections, not webhook intake, and it has no support for mixed auth methods.
+> - ❌ **SQS + Comprehend + Lex:** doesn't use **Bedrock**, and queueing adds latency.
+
 #### Event-driven GenAI integrations with EventBridge
 - **Typical flow:** business app → `PutEvents` (custom bus) → rule → Step Functions (call Bedrock via the **optimised `bedrock:invokeModel` integration**) → write result → emit `AnalysisCompleted` event → downstream consumers.
 - Step Functions has **direct Bedrock integrations** (`InvokeModel`, plus create/model-customisation tasks), so simple prompt calls need no Lambda.
@@ -181,6 +163,10 @@ def handler(event, _):
 | **End-user identity into data services** | **Trusted identity propagation**: the user's Identity Center identity flows to downstream services (Q Business, Redshift, Lake Formation, S3 Access Grants) for per-user authorisation | IAM Identity Center |
 | 🎯 **PQ5** **Agents calling tools on behalf of users** | Inbound auth (OAuth/JWT) + outbound OAuth token vault | **AgentCore Identity** (see [Task 2.1](01-task-2.1-agentic-ai-tool-integrations.md)) |
 
+- **Key principle:** application code should never hold long-term access keys. Use roles and STS temporary credentials everywhere. Bedrock supports temporary credentials and **forward access sessions** (FAS) when it calls downstream services such as S3 for KB ingestion using the caller's context.
+- **Bedrock API keys** (short-term and long-term) exist for quick developer access. Prefer short-term keys or IAM roles in production (*verify current guidance in docs*).
+- **Per-user data filtering in RAG:** pass user attributes (department, clearance) from the JWT or Identity Center into **KB metadata filters**, or use **Q Business ACL-aware** connectors that respect source permissions. Never rely on the prompt alone to hide data.
+
 > [!WARNING]
 > **🎯 Practice question 5 — agent queries DynamoDB across 25 → 40+ accounts as a specific user, LEAST overhead**
 >
@@ -194,10 +180,6 @@ def handler(event, _):
 > - ❌ **AWS RAM can't share DynamoDB tables.** DynamoDB isn't a RAM-shareable resource type; RAM shares things like subnets, Transit Gateways and License Manager configurations. *(Checked against the RAM shareable-resources list, 2026-11-15.)*
 > - ❌ **SCPs never grant permissions.** They only set the **maximum** allowed, so you still need identity or resource policies plus a cross-account trust.
 > - ❌ **One agent per account + API Gateway routing** duplicates 25–40 deployments, which means high operational overhead.
-
-- **Key principle:** application code should never hold long-term access keys. Use roles and STS temporary credentials everywhere. Bedrock supports temporary credentials and **forward access sessions** (FAS) when it calls downstream services such as S3 for KB ingestion using the caller's context.
-- **Bedrock API keys** (short-term and long-term) exist for quick developer access. Prefer short-term keys or IAM roles in production (*verify current guidance in docs*).
-- **Per-user data filtering in RAG:** pass user attributes (department, clearance) from the JWT or Identity Center into **KB metadata filters**, or use **Q Business ACL-aware** connectors that respect source permissions. Never rely on the prompt alone to hide data.
 
 #### RBAC and ABAC for model and data access
 - **RBAC:** IAM roles per persona (`DataScientist` can fine-tune and evaluate; `AppRuntime` can only invoke approved models; `PlatformAdmin` manages guardrails and Provisioned Throughput).
@@ -229,6 +211,16 @@ def handler(event, _):
 - 🎯 **PQ22** **Enforce guardrails:** the condition key `bedrock:GuardrailIdentifier` can require a specific guardrail on invoke calls. Bedrock also supports **account-level and organisation-level enforced guardrails** (organisation-level requires a guardrail resource-based policy).
 - **ABAC example:** allow invoke only on inference profiles whose tag matches the caller's team.
 
+```json
+{
+  "Effect": "Allow",
+  "Action": "bedrock:InvokeModel",
+  "Resource": "arn:aws:bedrock:*:111122223333:application-inference-profile/*",
+  "Condition": { "StringEquals": { "aws:ResourceTag/team": "${aws:PrincipalTag/team}" } }
+}
+```
+- **Network-scoped access:** add `"Condition": {"StringEquals": {"aws:SourceVpce": "vpce-0abc..."}}` to deny Bedrock calls that don't come through your PrivateLink endpoint.
+
 > [!WARNING]
 > **🎯 Practice question 22 — many accounts: block topics and proprietary info in prompts + allow only approved models (choose 2)**
 >
@@ -242,17 +234,8 @@ def handler(event, _):
 > - ❌ **Guardrail with a MASK policy:** masking applies only to **sensitive information filters**. It can't block denied topics.
 > - ℹ️ **Newer option:** Bedrock **organisation-level enforced guardrails** (see the Guardrails notes in Task 3.1). The exam answer for this question is boundary + SCP + StackSets.
 
-```json
-{
-  "Effect": "Allow",
-  "Action": "bedrock:InvokeModel",
-  "Resource": "arn:aws:bedrock:*:111122223333:application-inference-profile/*",
-  "Condition": { "StringEquals": { "aws:ResourceTag/team": "${aws:PrincipalTag/team}" } }
-}
-```
-- **Network-scoped access:** add `"Condition": {"StringEquals": {"aws:SourceVpce": "vpce-0abc..."}}` to deny Bedrock calls that don't come through your PrivateLink endpoint.
-
 #### Private network access to Bedrock (PrivateLink)
+Policies decide *who* may call Bedrock; PrivateLink decides *which path* the call takes. (Endpoint policy vs `aws:SourceVpce` and data-access monitoring: [Task 3.2 · Skill 3.2.1](../domain-3-ai-safety-security-governance/02-task-3.2-data-security-privacy.md#skill-321--protected-ai-environments-network-iam-lake-formation-monitoring).)
 - Interface endpoint service names: `com.amazonaws.<region>.bedrock` (control plane), `.bedrock-runtime` (inference), `.bedrock-agent` (agent/KB build-time), `.bedrock-agent-runtime` (`InvokeAgent`, `Retrieve`, `RetrieveAndGenerate`), plus `bedrock-fips` / `bedrock-runtime-fips` in selected US/Canada/GovCloud Regions. A `bedrock-mantle` endpoint also exists (*verify purpose in docs*).
 - **Private DNS enabled** → SDK calls to `bedrock-runtime.<region>.amazonaws.com` resolve to endpoint ENIs with **no code change**. Disabled → pass `endpoint_url=https://vpce-...bedrock-runtime.<region>.vpce.amazonaws.com`.
 - **Endpoint policy** (resource policy on the endpoint) restricts which principals, actions and resources are allowed through it. The default is full access.
@@ -274,7 +257,7 @@ def handler(event, _):
 | Low latency to a metro area / no local Region | **AWS Local Zones** |
 | Disconnected or intermittent edge | Snowball Edge / IoT Greengrass with small on-device models |
 
-- **CRIS facts (verified):**
+- **CRIS facts that matter for residency (verified)** (CRIS as a resilience tool: [Task 1.2 · Skill 1.2.3](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md#skill-123--resilient-ai-systems)):
   - Data stays on the **AWS network**, encrypted in transit between Regions.
   - **CloudTrail logs the call in the source Region**. Check `additionalEventData.inferenceRegion` to see where it was processed.
   - Price is based on the **source Region**. There is no extra routing charge.
@@ -313,6 +296,17 @@ def handler(event, _):
 - **Outposts:** an extension of a Region (control plane in the parent Region over the **service link**). Local Gateway connects to the on-prem network. Data on Outposts EBS/S3 on Outposts stays local.
 - **Wavelength:** subnets in a Wavelength Zone, traffic through the **carrier gateway**. Suited to AR/VR, connected vehicles and real-time video inference near devices. Large FMs still run in the parent Region (hybrid: small model at the edge, escalate to the Region).
 
+> [!IMPORTANT]
+> **🎯 Practice question 71 — patient data must stay on-premises per country, <100 ms diagnostics at remote clinics, cloud FMs for analytics**
+>
+> - **AWS Outposts** in the countries with residency rules → **store and process patient data on-premises** using the **same AWS APIs and tools**, so development works the same in every environment.
+> - **AWS Wavelength** (compute at the 5G carrier edge) near the clinics → **real-time inference under 100 ms**.
+> - **Cloud FMs in the Region** analyse **aggregated or non-sensitive** data at scale.
+> - ❌ **Global Accelerator + DataSync to S3 + one central endpoint:** copies the data out of the country, and too much latency.
+> - ❌ **EC2 GPUs in Regions + copying data to the cloud:** breaks residency, and too much latency.
+> - ❌ **Self-managed EC2/EBS per country + Systems Manager + CSV exports:** heavy operations, and no edge.
+> - 🔁 **Cue:** *"data must stay on-premises"* → **Outposts**. *"ultra-low latency to mobile or 5G devices"* → **Wavelength**. *"metro proximity"* → **Local Zones**.
+
 ### Skill 2.3.5 — CI/CD pipelines and GenAI gateway architectures
 
 > *Implement CI/CD pipelines and GenAI gateway architectures to implement secure and compliant consumption patterns in enterprise environments (for example, by using AWS CodePipeline, AWS CodeBuild, automated testing frameworks for continuous deployment and testing of GenAI components with security scans and rollback support, centralized abstraction layers, observability and control mechanisms).*
@@ -326,7 +320,7 @@ def handler(event, _):
 1. **Source:** CodeCommit/GitHub (CodeConnections) → trigger on PR merge or tag.
 2. **Build (CodeBuild):** unit tests, lint, package, **SAST** (Amazon **CodeGuru Security** / Amazon Q Developer security scan, Semgrep, Bandit), **dependency/SCA** (Amazon Inspector for Lambda/ECR images, `pip-audit`), **IaC scanning** (cfn-lint, cfn-guard, Checkov), **secret scanning**.
 3. **Deploy to test/staging:** CloudFormation/CDK/SAM.
-4. **GenAI quality gate (CodeBuild or Step Functions):**
+4. 🎯 **PQ66** **GenAI quality gate (CodeBuild or Step Functions)** (golden datasets and gate design: [Task 5.1 · Skill 5.1.4](../domain-5-testing-validation-troubleshooting/01-task-5.1-evaluation-systems.md#skill-514--systematic-quality-assurance-processes--pq37--pq66)):
    - Run the golden prompt set against the new prompt/model/KB config.
    - **Bedrock Evaluations** job or a custom LLM-as-judge → fail the build if accuracy, faithfulness or toxicity cross thresholds.
    - Red-team / prompt-injection test suite, guardrail tests (PII blocked, denied topics).
@@ -334,15 +328,6 @@ def handler(event, _):
 5. **Manual approval** action (for regulated environments).
 6. **Production deploy:** canary or linear (**CodeDeploy** for Lambda/ECS: `Canary10Percent5Minutes`, and similar), shift the agent/prompt alias, or the gateway router sends X% to the new model (shadow / A-B).
 7. **Automatic rollback:** CloudWatch alarms on error rate, latency, guardrail interventions, user thumbs-down rate → CodeDeploy rollback or pipeline stage rollback. CodePipeline V2 supports **automatic rollback on stage failure** (*verify in docs*).
-
-> [!IMPORTANT]
-> **🎯 Practice question 66 — QA for prompt and model changes: compare templates, detect quality issues, metrics, human feedback, block bad configs**
->
-> - **Bedrock evaluation jobs** with **custom prompt datasets** compare the outputs of the different prompt templates and models, give **quantitative metrics** (automatic or LLM-as-a-judge), and support **human evaluation** jobs.
-> - **CodePipeline** runs the evaluation jobs whenever a template changes and **deploys only the configurations that score above the threshold**.
-> - ❌ **Shadow traffic + Comprehend sentiment:** sentiment ≠ quality, and no template comparison.
-> - ❌ **CloudWatch latency and error alarms + manual approval:** operational metrics only, not quality.
-> - ❌ **Lambda + S3 + QuickSight + daily manual review:** manual, with no standard metrics.
 
 ```yaml
 # buildspec.yml for the GenAI quality gate (sketch)
@@ -369,6 +354,17 @@ reports:
 
 - **Cross-account deployment:** a tooling account runs the pipeline and assumes deploy roles in dev/test/prod accounts. Artefacts are encrypted with a KMS key shared across accounts.
 - **Model lifecycle pipelines** (fine-tuned models): **SageMaker Pipelines** (train → evaluate → register in **Model Registry** with `PendingManualApproval`) → approval event in EventBridge → CodePipeline deploys the endpoint. See [Domain 1 · Task 1.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md).
+
+> [!IMPORTANT]
+> **🎯 Practice question 66 — QA for prompt and model changes: compare templates, detect quality issues, metrics, human feedback, block bad configs**
+>
+> - **Bedrock evaluation jobs** with **custom prompt datasets** compare the outputs of the different prompt templates and models, give **quantitative metrics** (automatic or LLM-as-a-judge), and support **human evaluation** jobs.
+> - **CodePipeline** runs the evaluation jobs whenever a template changes and **deploys only the configurations that score above the threshold**.
+> - ❌ **Shadow traffic + Comprehend sentiment:** sentiment ≠ quality, and no template comparison.
+> - ❌ **CloudWatch latency and error alarms + manual approval:** operational metrics only, not quality.
+> - ❌ **Lambda + S3 + QuickSight + daily manual review:** manual, with no standard metrics.
+
+With releases under control, the remaining enterprise problem is runtime consumption: how every team reaches FMs consistently.
 
 #### GenAI gateway architecture
 **Problem:** many teams call FMs directly with their own keys and model choices. Logging is inconsistent, guardrails are missing, costs can't be attributed, and quotas get exhausted by one team.

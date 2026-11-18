@@ -9,16 +9,16 @@
 > - Skill 4.1.4: Intelligent caching systems that avoid unnecessary FM calls (semantic caching, result fingerprinting, edge caching, deterministic request hashing, prompt caching)
 
 ## Key points
-- **You pay per token, and output tokens usually cost several times more than input tokens.** The biggest savings come from cutting output length (`maxTokens`, stop sequences, "answer in ≤ 3 bullets") and from sending fewer repeated input tokens (prompt caching, context pruning).
-- **Estimate before you call, measure after.** Use the **`CountTokens` API** (free, model-specific, exact) before the call, the Converse **`usage`** fields (`inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens`) after it, and **model invocation logs** plus **CloudWatch `InputTokenCount`/`OutputTokenCount`** across the fleet.
-- **To see cost per team or app**, put each workload behind an **application inference profile** with **cost allocation tags**. These show up in Cost Explorer and CUR.
-- **Tiered model usage.** Send routine queries to a small, cheap model (Nova Micro/Lite, Haiku-class) and escalate to a large model only when needed (classifier, confidence threshold or cascade). Managed option: **Bedrock Intelligent Prompt Routing** (two models from the same family).
-- **Large offline workloads → batch inference.** It costs about **50% less than on-demand** for supported models (verify in docs). Input and output are JSONL in S3. It isn't supported for provisioned models, and Converse-type batch jobs can't use tool calling.
-- **Picking how you pay:** on-demand for spiky or unknown traffic, **Flex tier** for latency-tolerant work, **Priority tier** for latency-critical work, and **Reserved tier or Provisioned Throughput** only when steady high utilisation justifies a commitment (custom models need PT). Idle PT costs money every hour.
-- **Bedrock prompt caching (explicit):** put `cachePoint` markers after **stable content**, which is processed in the order `tools → system → messages`. Claude allows up to **4 checkpoints**. The prefix needs at least **512–4,096 tokens** depending on the model. The default TTL is **5 minutes** and resets on each hit; some Claude models also offer **1 hour**. Cache reads are billed at a discount, and cache writes can cost more than normal input. Caching doesn't work with batch inference.
-- **Application-level caching:** an **exact-match cache** (SHA-256 of the normalised request, kept in ElastiCache or DynamoDB with a TTL) gives deterministic hits. A **semantic cache** (embed the query, run a k-NN lookup in ElastiCache/MemoryDB/OpenSearch, return the cached answer above a similarity threshold such as 0.9) catches paraphrased questions. **CloudFront or API Gateway caching** is for public, non-personalised GET responses.
-- **Caching gotchas:** never let a cache leak data across tenants (put the tenant or user ID in the key), invalidate the cache when the KB, prompt version or model version changes, and only cache answers that are deterministic (low temperature).
-- **Throughput and utilisation:** use **SageMaker auto scaling** on `InvocationsPerInstance` or `ConcurrentRequestsPerModel` (or concurrency metrics for LLMs), **inference components** to pack several models onto one instance, **scale to zero** for dev and test, and **async or serverless** endpoints for intermittent traffic.
+- **Mental model: cost = tokens × price × number of calls.** The four skills are the four levers: send fewer tokens (4.1.1), use a cheaper model (4.1.2), pay a cheaper way and keep capacity busy (4.1.3), and skip the call entirely with a cache (4.1.4).
+- **Output tokens cost several times more than input tokens**, so capping output (`maxTokens`, stop sequences, short formats) is usually the first and biggest win. Then prune repeated input: history, RAG chunks, tool catalogues (4.1.1).
+- **Estimate before, measure after, attribute per team:** `CountTokens` before the call, the `usage` block and CloudWatch after it, and **application inference profiles + cost allocation tags** for chargeback (4.1.1).
+- **Pick the cheapest model that meets the quality bar**, compared on **cost per successful task**, not price per token (4.1.2).
+- **Mixed-difficulty traffic → tier it:** static routing, classifier router, cascade, **Intelligent Prompt Routing** (managed, one model family) or a **distilled** small model (4.1.2).
+- **Purchase option follows traffic shape:** spiky → on-demand · deferrable → Flex or batch · latency-critical → Priority · steady and high → Reserved or PT. **Idle PT is pure waste** (4.1.3).
+- **Offline volume → batch inference** (about half the on-demand price). It doesn't work with provisioned models or prompt caching (4.1.3).
+- **Self-hosted models:** keep GPUs busy (continuous batching, inference components) and scale to zero when idle. Scaling mechanics are in [4.2.5](02-task-4.2-application-performance.md#skill-425--efficient-resource-allocation-for-fm-workloads) (4.1.3).
+- **Choose the cache by what repeats:** identical public GETs → edge · identical requests → exact-match hash · paraphrases → semantic cache · a long stable prefix → **Bedrock prompt caching** (4.1.4).
+- **Caches fail quietly:** a prompt-cache prefix below the minimum size caches nothing, and an app cache without tenant and version in the key leaks or serves stale answers (4.1.4).
 
 ## Notes
 
@@ -63,7 +63,7 @@ if resp["inputTokens"] > BUDGET:      # e.g. reject, summarise or trim before ca
 | CloudWatch `AWS/Bedrock` metrics | `InputTokenCount`, `OutputTokenCount`, `Invocations`, `InvocationLatency`, throttles. Dimension: `ModelId` | Fleet-wide dashboards and alarms |
 | Model invocation logging (CloudWatch Logs / S3) | Full request and response plus token counts and identity | Find which prompts are expensive and who is calling (Logs Insights) |
 | Application inference profiles + cost allocation tags | Cost per tagged profile in Cost Explorer / CUR | Chargeback and showback per team, app or tenant |
-| AWS Budgets / Cost Anomaly Detection | Alerts on spend thresholds and unusual spend | Guard against runaway agents or token bursts (see [Task 4.3](03-task-4.3-monitoring-observability.md)) |
+| AWS Budgets / Cost Anomaly Detection | Alerts on spend thresholds and unusual spend | Guard against runaway agents or token bursts (see [Task 4.3 · Skill 4.3.2](03-task-4.3-monitoring-observability.md#skill-432--comprehensive-genai-monitoring-and-kpis)) |
 
 - ⚠️ When **prompt caching** is in use, `inputTokens` counts **only non-cached** tokens. Total input = `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`.
 - **Application inference profile pattern:** create one profile per app or team that wraps a model or a system cross-Region profile, tag it (`CostCenter=claims`), activate the tag in Billing, and have each app call **its own profile ARN** as the `modelId`.
@@ -93,6 +93,10 @@ A bigger context window costs more. **Every token in the prompt is paid for on e
 | **Trim tool catalogue** | Expose only the tools relevant to the current intent, with short descriptions | Per-turn overhead | The agent may miss a tool |
 | **Strip boilerplate in preprocessing** | Remove HTML, headers/footers, signatures and duplicates before embedding or prompting ([Task 1.3](../domain-1-fm-integration-data-compliance/03-task-1.3-data-validation-processing.md)) | Medium | Little |
 
+- **Context pruning** means deliberately removing low-value content (old turns, low-score chunks, superseded tool results) **before** each call. Agents should truncate or summarise large tool outputs before putting them back into the loop.
+- **"Lost in the middle":** long contexts also **reduce quality**, because models attend less to content in the middle. Shorter context is cheaper **and** often better.
+- Bedrock Agents and Strands also manage the context window. For example, Strands has conversation managers such as sliding-window or summarising managers (see [Task 2.1 · Skill 2.1.1](../domain-2-implementation-integration/01-task-2.1-agentic-ai-tool-integrations.md#skill-211--autonomous-systems-with-memory--state-management)).
+
 > [!IMPORTANT]
 > **🎯 Practice question 19 — long, repetitive chat histories push up tokens and cost; no major architecture change**
 >
@@ -105,9 +109,7 @@ A bigger context window costs more. **Every token in the prompt is paid for on e
 > - ❌ **A bigger-context model:** accepts more tokens and doesn't reduce them.
 > - ❌ **Send the full history every time:** the opposite of what's needed.
 
-- **Context pruning** means deliberately removing low-value content (old turns, low-score chunks, superseded tool results) **before** each call. Agents should truncate or summarise large tool outputs before putting them back into the loop.
-- **"Lost in the middle":** long contexts also **reduce quality**, because models attend less to content in the middle. Shorter context is cheaper **and** often better.
-- Bedrock Agents and Strands also manage the context window. For example, Strands has conversation managers such as sliding-window or summarising managers (see [Task 2.1](../domain-2-implementation-integration/01-task-2.1-agentic-ai-tool-integrations.md)).
+Trimming the input is half the job. The other half is bounding what the model writes back.
 
 #### Response size controls / response limiting
 - **`inferenceConfig.maxTokens`** sets a hard cap on output tokens. If the output hits the cap, the response has `stopReason = "max_tokens"` and is truncated. Handle this case: ask the model to continue, or reduce scope.
@@ -146,7 +148,7 @@ Illustrative prices: $X per 1K input tokens and $4X per 1K output tokens.
 
 #### Cost-capability trade-off evaluation
 1. **Define the quality bar** for the task: accuracy, faithfulness, format compliance and latency SLO, measured on a **golden dataset** that represents real traffic.
-2. **Shortlist candidates** of different sizes: e.g. Nova Micro / Lite / Pro, Claude Haiku / Sonnet, Llama 8B / 70B. FM selection criteria are covered in [Task 1.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md).
+2. **Shortlist candidates** of different sizes: e.g. Nova Micro / Lite / Pro, Claude Haiku / Sonnet, Llama 8B / 70B. FM selection criteria are covered in [Task 1.2 · Skill 1.2.1](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md#skill-121--assess-and-choose-fms).
 3. **Evaluate each candidate** with **Bedrock Model Evaluation** (automatic, LLM-as-a-judge, or human). For each one record the quality score, p50/p95 latency, and average input and output tokens.
 4. **Compute cost per successful task**, not just cost per token:
 
@@ -171,6 +173,16 @@ price_performance = quality_score / cost_per_task
 | 🎯 **PQ1** **Distilled model** | Bedrock **Model Distillation**: a large teacher generates training data and a small student is fine-tuned on it | High-volume narrow task where the small model isn't quite good enough | Training cost. Bedrock custom models may need PT or on-demand custom model deployment (verify in docs) |
 | **Fine-tuned small model** | SFT or LoRA on your own data (SageMaker or Bedrock) | Domain-specific format or style at high volume | Data and lifecycle cost |
 
+```python
+# Cascade sketch
+small = call(model=NOVA_LITE, prompt=p, max_tokens=300)
+if not passes_schema(small) or self_rated_confidence(small) < 0.7:
+    return call(model=SONNET, prompt=p, max_tokens=600)   # escalate
+return small
+```
+
+- Cascading as a pattern is covered in [Task 2.2 · Skill 2.2.3](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-223--optimise-fm-deployment-for-performance-and-resource-use). Routing mechanics (Step Functions Choice states, API Gateway transforms, metric-based routing) are in [Task 2.4 · Skill 2.4.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md#skill-244--intelligent-model-routing-systems). Dynamic model switching with AppConfig is in [Task 1.2 · Skill 1.2.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md#skill-122--flexible-architecture-for-dynamic-model-selection--provider-switching).
+
 > [!IMPORTANT]
 > **🎯 Practice question 57 — moderation cascade: small model first, escalate confidence <0.65 asynchronously, spiky load, decoupled**
 >
@@ -180,16 +192,6 @@ price_performance = quality_score / cost_per_task
 > - ❌ **Running both models in parallel every time:** pays for the large model on every request.
 > - ❌ **Synchronous API Gateway chain:** not decoupled, and low-confidence requests aren't asynchronous.
 > - ❌ **EC2 + keyword heuristics:** infrastructure to manage, and routing by guesswork instead of confidence.
-
-Routing mechanics (Step Functions Choice states, API Gateway transforms, metric-based routing) are covered in [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md). Dynamic model switching with AppConfig is covered in [Task 1.2](../domain-1-fm-integration-data-compliance/02-task-1.2-select-configure-fms.md).
-
-```python
-# Cascade sketch
-small = call(model=NOVA_LITE, prompt=p, max_tokens=300)
-if not passes_schema(small) or self_rated_confidence(small) < 0.7:
-    return call(model=SONNET, prompt=p, max_tokens=600)   # escalate
-return small
-```
 
 #### Inference cost balancing against response quality
 - Ways to reduce cost and their quality effect:
@@ -214,7 +216,7 @@ return small
 #### Efficient inference patterns (cost lens)
 - **Batch inference** for anything that doesn't need an answer within seconds: nightly summarisation, back-filling embeddings, classifying documents, generating evaluation datasets.
 - **Asynchronous processing** with SQS and workers that run at a controlled rate, which smooths spikes and avoids paying for over-provisioned capacity.
-- **Pre-computation**: generate answers to predictable queries offline (FAQ answers, product descriptions) and serve them from a cache or database. This overlaps with [Task 4.2](02-task-4.2-application-performance.md).
+- **Pre-computation**: generate answers to predictable queries offline (FAQ answers, product descriptions) and serve them from a cache or database. Latency side: [Task 4.2 · Skill 4.2.1](02-task-4.2-application-performance.md#skill-421--responsive-ai-systems-latency-vs-cost-trade-offs).
 - **Use non-LLM tools where they're enough**: regex, Comprehend, Textract or a SQL query are often cheaper and more deterministic than an FM call.
 - **Embeddings**: choose smaller dimensions (Titan V2 at 512 or 256), embed in batches, and only re-embed **changed** documents.
 
@@ -224,35 +226,10 @@ return small
 
 > *Develop high-performance FM systems to maximize resource utilization and throughput for GenAI workloads (for example, by using batching strategies, capacity planning, utilization monitoring, auto-scaling configurations, provisioned throughput optimization).*
 
-#### Batching strategies
-
-| Level | Mechanism | Notes |
-| --- | --- | --- |
-| **Bedrock batch inference** | `CreateModelInvocationJob` with JSONL in S3 (`recordId` + `modelInput`, InvokeModel or Converse format) and output to S3 | About **50% cheaper** than on-demand for supported models (verify in docs). Has minimum and maximum records per job and file-size quotas (verify in docs). **Not for provisioned models.** Converse-type jobs can't use tool calling (use the InvokeModel type). Structured outputs work. Track job state with EventBridge events instead of polling |
-| **OpenAI-compatible Batch API** | Bedrock also accepts batches in OpenAI Batch API format for OpenAI models | Same idea |
-| **SageMaker Batch Transform** | Offline inference over S3 data on transient instances | Pay only while the job runs |
-| **SageMaker async endpoint** | Queue up to 1 GB payloads, scales to 0 | Intermittent heavy jobs |
-| **Request batching in the server** | Continuous or dynamic batching in LMI, vLLM or TGI containers | Raises GPU utilisation for self-hosted models ([Task 2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md)) |
-| **Client-side micro-batching** | Group many small items (e.g. classify 20 short texts) into **one prompt** with structured output | Fewer calls, so less repeated system-prompt overhead. Risk: one bad item breaks the batch |
-| **Embedding batching** | Send many texts per call where the model supports it, or use a batch job | Titan V2 accepts one text per InvokeModel call, so use batch jobs for large backfills (verify in docs) |
-
-```jsonl
-{"recordId": "r-0001", "modelInput": {"messages": [{"role":"user","content":[{"text":"Summarise: ..."}]}], "inferenceConfig": {"maxTokens": 200}}}
-{"recordId": "r-0002", "modelInput": {"messages": [{"role":"user","content":[{"text":"Summarise: ..."}]}], "inferenceConfig": {"maxTokens": 200}}}
-```
-
-#### Capacity planning for token processing
-- Work out peak **TPM**: `peak RPS × 60 × (avg input + avg output tokens)`, then compare it with the account **TPM/RPM quotas** for that model and Region in Service Quotas.
-- If you're over quota:
-  1. Use **cross-Region inference** profiles (geographic or global), which give more capacity across Regions.
-  2. Request a **quota increase**.
-  3. Move to the **Reserved** tier or **Provisioned Throughput**.
-  4. Flatten the peak with **queues** (SQS) and **backoff**.
-- Plan for **output tokens** separately, because they drive both latency and cost.
-- Also check **max concurrency** limits for agents, KB queries and Lambda.
+Idle capacity and one-call-per-item processing are the two big sources of waste. This skill is about paying for capacity in the cheapest way that fits the traffic, and then keeping it busy.
 
 #### Choosing the inference purchase option (cost view)
-Deep detail is in [Task 2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md). For cost:
+How each option works is in [Task 2.2 · Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements). This is the cost comparison:
 
 | Option | Pay for | Best when | Watch out |
 | --- | --- | --- | --- |
@@ -270,42 +247,44 @@ Break-even utilisation = `hourly commitment cost / (on-demand cost per hour at f
 - "Business-hours only, idle at night" → on-demand (or PT without commitment, deleted after hours, if the model is custom).
 - "Using a fine-tuned Bedrock model" → PT or custom model on-demand deployment, depending on support (verify in docs).
 
-#### Utilisation monitoring
+**Capacity planning (cost view):** size any commitment from **measured** peak TPM, worked out with the method in [Skill 4.2.5](02-task-4.2-application-performance.md#skill-425--efficient-resource-allocation-for-fm-workloads). If peak demand is over quota, try the options that need no commitment first: **cross-Region inference**, a **quota increase**, and flattening the peak with **SQS + backoff**. Buy Reserved or PT only for load that is steady.
+
+#### Batching strategies
+Once the purchase option is chosen, batching raises how much work each call or instance does.
+
+| Level | Mechanism | Notes |
+| --- | --- | --- |
+| **Bedrock batch inference** | `CreateModelInvocationJob` with JSONL in S3 (`recordId` + `modelInput`, InvokeModel or Converse format) and output to S3 | About **50% cheaper** than on-demand for supported models (verify in docs). **Not for provisioned models.** Converse-type jobs can't use tool calling (use the InvokeModel type). Job quotas, structured-output support and EventBridge job events → [Skill 2.2.1](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-221--deploy-fms-based-on-application-needs-and-performance-requirements) |
+| **OpenAI-compatible Batch API** | Bedrock also accepts batches in OpenAI Batch API format for OpenAI models | Same idea |
+| **SageMaker Batch Transform** | Offline inference over S3 data on transient instances | Pay only while the job runs |
+| **SageMaker async endpoint** | Queue up to 1 GB payloads, scales to 0 | Intermittent heavy jobs |
+| **Request batching in the server** | Continuous or dynamic batching in LMI, vLLM or TGI containers | Raises GPU utilisation for self-hosted models ([Task 2.2 · Skill 2.2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-222--address-the-llm-specific-challenges-of-deployment)) |
+| **Client-side micro-batching** | Group many small items (e.g. classify 20 short texts) into **one prompt** with structured output | Fewer calls, so less repeated system-prompt overhead. Risk: one bad item breaks the batch |
+| **Embedding batching** | Send many texts per call where the model supports it, or use a batch job | Titan V2 accepts one text per InvokeModel call, so use batch jobs for large backfills (verify in docs) |
+
+```jsonl
+{"recordId": "r-0001", "modelInput": {"messages": [{"role":"user","content":[{"text":"Summarise: ..."}]}], "inferenceConfig": {"maxTokens": 200}}}
+{"recordId": "r-0002", "modelInput": {"messages": [{"role":"user","content":[{"text":"Summarise: ..."}]}], "inferenceConfig": {"maxTokens": 200}}}
+```
+
+#### Utilisation monitoring and Provisioned Throughput right-sizing
 - **Bedrock:** use the `Invocations`, `InputTokenCount`/`OutputTokenCount`, `InvocationThrottles` and latency metrics. Compare actual TPM with quota or with the PT capacity. Use the CloudWatch `ResolvedServiceTier` dimension to see which tier actually served the request.
-- **PT utilisation:** if usage stays under about 50% of the provisioned model units, you're over-provisioned. Reduce MUs at renewal or move to on-demand.
 - **SageMaker:** use `CPUUtilization`, `GPUUtilization`, `GPUMemoryUtilization`, `InvocationsPerInstance`, `ModelLatency` and `ConcurrentRequestsPerModel`. Low GPU utilisation means right-size the instance (e.g. move to a smaller g6 or Inferentia2), pack models with **inference components**, or consolidate onto **multi-model endpoints**.
 - **Cost views:** Cost Explorer grouped by usage type and tags, CUR in Athena, **Cost Anomaly Detection** for spikes, and **AWS Budgets** alerts per app tag.
 
-#### Auto scaling configurations (self-hosted models)
-- SageMaker real-time endpoints use **Application Auto Scaling** (target tracking).
-  - Classic metric: `SageMakerVariantInvocationsPerInstance`.
-  - For LLMs, **concurrency-based** metrics (`ConcurrentRequestsPerModel` / per copy) track real load better than invocation counts, because one request can run for many seconds (verify in docs).
-- **Inference components:** each model copy scales independently, and instances scale under them. Can scale to zero (verify in docs).
-- **Scale-in protection and cooldowns:** LLM containers take minutes to load weights. Scale out early (use a lower target) and scale in slowly. Use **Fast Model Loader** or cached containers to cut cold starts.
-- **Scheduled scaling** for predictable daily peaks.
-- **Serverless Inference** for low, sporadic traffic: CPU only, up to 6 GB memory, so small models only. **Async endpoints** can scale to 0 instances.
-- **Spot** works for **training and batch** (Managed Spot Training), not for real-time endpoints.
-
-```python
-aas = boto3.client("application-autoscaling")
-aas.register_scalable_target(ServiceNamespace="sagemaker",
-    ResourceId="endpoint/llm-ep/variant/AllTraffic",
-    ScalableDimension="sagemaker:variant:DesiredInstanceCount", MinCapacity=1, MaxCapacity=8)
-aas.put_scaling_policy(PolicyName="llm-tt", ServiceNamespace="sagemaker",
-    ResourceId="endpoint/llm-ep/variant/AllTraffic",
-    ScalableDimension="sagemaker:variant:DesiredInstanceCount", PolicyType="TargetTrackingScaling",
-    TargetTrackingScalingPolicyConfiguration={
-        "TargetValue": 4.0,   # concurrent requests per instance
-        "PredefinedMetricSpecification": {"PredefinedMetricType": "SageMakerVariantConcurrentRequestsPerModelHighResolution"},  # verify metric name in docs
-        "ScaleInCooldown": 600, "ScaleOutCooldown": 60})
-```
-
-#### Provisioned Throughput optimisation checklist
+**Provisioned Throughput checklist:**
 - Size PT from **measured** peak TPM plus headroom, not guesses. Start on on-demand and measure first.
 - Use **no-commitment PT** for testing a custom model and delete it afterwards.
-- Combine PT with **on-demand overflow** in app logic (or rely on the Reserved tier's built-in overflow to Standard).
-- Track utilisation. Unused MUs are pure waste.
+- **Under-used:** if usage stays under about 50% of the provisioned model units, you're over-provisioned. Unused MUs are pure waste, so reduce MUs at renewal or move bursty traffic back to on-demand.
+- **Saturated:** add MUs, or combine PT with **on-demand or CRIS overflow** in app logic (or rely on the Reserved tier's built-in overflow to Standard).
 - PT is per model **version**, so plan the migration when you upgrade a model.
+
+#### Auto scaling (cost view, self-hosted models)
+The cost goal is to match capacity to load so you don't pay for idle GPUs. Scaling metrics, policy types, cooldowns and a worked example are in [Skill 4.2.5](02-task-4.2-application-performance.md#skill-425--efficient-resource-allocation-for-fm-workloads), and LLM serving specifics in [Task 2.2 · Skill 2.2.2](../domain-2-implementation-integration/02-task-2.2-model-deployment-strategies.md#skill-222--address-the-llm-specific-challenges-of-deployment).
+- **Scale to zero** for dev/test and idle models: **inference components** (each model copy scales independently and can scale to zero; verify in docs) or **async endpoints**.
+- **Serverless Inference** for low, sporadic traffic, but it's CPU only with up to 6 GB of memory, so small models only.
+- **Scheduled scaling** to shrink capacity outside predictable peaks.
+- **Spot** works for **training and batch** (Managed Spot Training), not for real-time endpoints.
 
 ---
 
@@ -327,6 +306,8 @@ Client ─► CloudFront / API GW cache ─► App ─► [exact-match cache] �
 | **Result fingerprinting** | Re-processing unchanged inputs | Hash of the **input content** (document bytes, record) | DynamoDB, S3 object metadata | Don't re-summarise or re-embed documents that haven't changed |
 | **Semantic cache** | The FM call for paraphrased questions | Cosine similarity ≥ threshold between embeddings | ElastiCache/MemoryDB vector search, OpenSearch k-NN | FAQ-like traffic with many paraphrases |
 | **Bedrock prompt caching** | Re-processing the **prefix** inside the model | Exact prefix match up to a cache checkpoint | Managed by Bedrock | Long, stable system prompts, documents, tool definitions, multi-turn chats, agent loops |
+
+The sections below work from the layer inside the model outwards: prompt caching, then the semantic and exact-match caches in your app, then the edge, and finally how to keep all of them fresh.
 
 #### Bedrock prompt caching — details
 - **Two types:**
@@ -352,15 +333,6 @@ Client ─► CloudFront / API GW cache ─► App ─► [exact-match cache] �
 - **Not supported with batch inference.** It works with Converse, ConverseStream, InvokeModel, InvokeModelWithResponseStream, CRIS and Prompt Management (an option on the prompt).
 - **Also lowers latency:** time to first token drops for long prefixes. Cost and latency both improve.
 
-> [!IMPORTANT]
-> **🎯 Practice question 3 — uploaded docs/images, accurate but slow, cost-effective fix**
->
-> - Users upload a document or image and then ask **several questions about it**. The same large context is reprocessed on every Converse call → **enable Bedrock prompt caching**.
-> - Put **`cachePoint` in `system` and `messages`** (after the uploaded document or image). Use the **lowest minimum token count** the model allows so the content actually gets cached. This lowers both **latency and input-token cost**.
-> - ❌ **Caching the prompt in ElastiCache:** the model still has to **reprocess the full context**. It only adds infrastructure.
-> - ❌ **Provisioned Throughput:** adds capacity, not lower per-request latency, and costs a lot per hour.
-> - ❌ **Chunking + OpenSearch vector index:** that's RAG ingestion and doesn't help with per-request uploads.
-
 ```python
 resp = brt.converse(
     modelId="us.anthropic.claude-sonnet-4-6",          # example ID; check the model card for caching support
@@ -374,19 +346,20 @@ print(u.get("cacheReadInputTokens"), u.get("cacheWriteInputTokens"), u["inputTok
 
 **When does prompt caching pay off?** When the **same prefix** is reused **more than about twice within the TTL**. The first call pays the write premium and later calls get the read discount. For a one-off prompt, a premium write rate makes caching **cost more**.
 
+> [!IMPORTANT]
+> **🎯 Practice question 3 — uploaded docs/images, accurate but slow, cost-effective fix**
+>
+> - Users upload a document or image and then ask **several questions about it**. The same large context is reprocessed on every Converse call → **enable Bedrock prompt caching**.
+> - Put **`cachePoint` in `system` and `messages`** (after the uploaded document or image). Use the **lowest minimum token count** the model allows so the content actually gets cached. This lowers both **latency and input-token cost**.
+> - ❌ **Caching the prompt in ElastiCache:** the model still has to **reprocess the full context**. It only adds infrastructure.
+> - ❌ **Provisioned Throughput:** adds capacity, not lower per-request latency, and costs a lot per hour.
+> - ❌ **Chunking + OpenSearch vector index:** that's RAG ingestion and doesn't help with per-request uploads.
+
 #### Semantic caching — design 🎯 PQ23
 1. Embed the incoming query with a cheap embedding model (Titan Text Embeddings V2 at 256–512 dims).
 2. Run a k-NN lookup (k=1) in the cache index, **filtered by tenant, locale and prompt version**.
 3. If similarity ≥ **threshold** (e.g. 0.90–0.95 cosine), return the cached answer and record a hit metric.
 4. Otherwise call the FM, store `{embedding, query, answer, metadata, ttl}`, and return the answer.
-
-> [!IMPORTANT]
-> **🎯 Practice question 23 — 40% of queries are rephrased versions of the same questions: fewer calls, consistent answers, low latency**
->
-> - **Semantic cache:** embed each query with **Bedrock (Titan Embeddings)** and store **vector + response** in **MemoryDB for Valkey** (in-memory vector search). Use a **vector RANGE query** (similarity within a radius or threshold) to find an equivalent earlier question and return its answer.
-> - This means **fewer FM calls**, **the same answer for equivalent questions**, and **millisecond latency**.
-> - ❌ **DAX / DynamoDB key lookups, `LIKE`, stemming, GSI on normalised text:** all are **exact or lexical matches**, so rephrased questions miss the cache.
-> - ❌ **OpenSearch k-NN over raw text pairs:** k-NN needs **vector embeddings**, not text.
 
 | Store | Notes |
 | --- | --- |
@@ -404,7 +377,15 @@ print(u.get("cacheReadInputTokens"), u.get("cacheWriteInputTokens"), u["inputTok
   - time-sensitive data (prices, stock levels), unless the TTL is short
   - high-temperature creative output
   - responses blocked by guardrails
-- **Security:** treat the cache as sensitive data. Encrypt it, isolate tenants, and apply the same guardrails or PII filtering **before** storing (see [Task 3.2](../domain-3-ai-safety-security-governance/02-task-3.2-data-security-privacy.md)).
+- **Security:** treat the cache as sensitive data. Encrypt it, isolate tenants, and apply the same guardrails or PII filtering **before** storing (see [Task 3.2 · Skill 3.2.2](../domain-3-ai-safety-security-governance/02-task-3.2-data-security-privacy.md#skill-322--privacy-preserving-systems-pii-detection-bedrock-privacy-guardrails-retention)).
+
+> [!IMPORTANT]
+> **🎯 Practice question 23 — 40% of queries are rephrased versions of the same questions: fewer calls, consistent answers, low latency**
+>
+> - **Semantic cache:** embed each query with **Bedrock (Titan Embeddings)** and store **vector + response** in **MemoryDB for Valkey** (in-memory vector search). Use a **vector RANGE query** (similarity within a radius or threshold) to find an equivalent earlier question and return its answer.
+> - This means **fewer FM calls**, **the same answer for equivalent questions**, and **millisecond latency**.
+> - ❌ **DAX / DynamoDB key lookups, `LIKE`, stemming, GSI on normalised text:** all are **exact or lexical matches**, so rephrased questions miss the cache.
+> - ❌ **OpenSearch k-NN over raw text pairs:** k-NN needs **vector embeddings**, not text.
 
 #### Deterministic request hashing & result fingerprinting
 - **Normalise before hashing:** lowercase, trim whitespace, sort JSON keys, and **include** the model ID, inference parameters, prompt template version, KB version and tenant. Otherwise you'll serve stale or cross-tenant answers.
@@ -423,7 +404,7 @@ def cache_key(tenant, model, params, prompt_ver, user_input):
 
 #### Edge caching
 - **CloudFront** in front of API Gateway or a Lambda function URL suits **GET** endpoints with cacheable, non-personalised generated content (e.g. generated product copy or translated static pages). Control it with `Cache-Control` headers and cache policies (cache key = path + selected query strings).
-- **API Gateway REST API stage caching** uses a TTL (default 300 s, maximum 3600 s) and per-method cache keys. It isn't available on HTTP APIs. **Response streaming mode disables caching** (see [Task 2.4](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md)).
+- **API Gateway REST API stage caching** uses a TTL (default 300 s, maximum 3600 s) and per-method cache keys. It isn't available on HTTP APIs. **Response streaming mode disables caching** (see [Task 2.4 · Skill 2.4.2](../domain-2-implementation-integration/04-task-2.4-fm-api-integrations.md#skill-242--real-time-ai-interaction-systems--pq24)).
 - Streaming chat responses and POST requests with personalised context are usually **not** edge-cacheable. Use the app-level caches instead.
 
 #### Cache invalidation & freshness
@@ -445,31 +426,31 @@ def cache_key(tenant, model, params, prompt_ver, user_input):
 | --- | --- |
 | "Estimate token cost before sending the request" / "check prompt fits the context window" | **CountTokens API** (free, exact per model) |
 | "Show Bedrock spend per team / application / tenant" | **Application inference profiles + cost allocation tags** → Cost Explorer / CUR |
-| Long, identical system prompt or document sent on every request; reduce cost and TTFT | **Bedrock prompt caching** (cachePoint after the stable prefix) |
-| Prompt caching enabled but `cacheReadInputTokens` always 0 | Prefix below the model's **minimum tokens**, dynamic content placed **before** the checkpoint, or a gap between calls longer than the TTL (5 min) |
-| Users ask the same question in many different phrasings | **Semantic cache**: embeddings + vector lookup in ElastiCache/MemoryDB with a similarity threshold |
-| Identical requests repeated; need deterministic reuse | **Exact-match cache** with a SHA-256 request hash (ElastiCache/DynamoDB TTL) |
-| Avoid re-summarising or re-embedding documents that haven't changed | **Result fingerprinting** (content hash) / incremental KB sync |
-| Public, non-personalised generated content served to many users | **CloudFront** / API Gateway cache |
-| Millions of documents to classify overnight, cheapest option | **Bedrock batch inference** (≈50% cheaper, JSONL in S3) |
-| Batch job with Converse format fails on records with `toolConfig` | Converse batch doesn't support tool calling → use the **InvokeModel** invocation type |
-| Most queries are simple, a few are complex; cut cost without hurting quality | **Tiered models / cascade / classifier router** or **Bedrock Intelligent Prompt Routing** |
-| 🎯 **PQ1** Need a small, cheap model that matches a large model on one narrow task | **Model distillation** (teacher → student) |
-| Steady 24×7 high volume, need guaranteed capacity | **Reserved tier / Provisioned Throughput** |
-| Spiky or unpredictable traffic, minimise cost | **On-demand** (+ CRIS for capacity) |
-| Background enrichment that can tolerate delay, real-time API | **Flex service tier** |
-| PT model units mostly idle | Over-provisioned → reduce MUs / move to on-demand / delete no-commit PT |
-| Using a custom fine-tuned model on Bedrock | **Provisioned Throughput** (or custom model on-demand deployment where supported) |
 | Answers too long and expensive | `maxTokens`, `stopSequences`, length instructions, structured output |
 | `stopReason = max_tokens` and answers cut off | Raise `maxTokens` or ask for shorter output / continuation; monitor the truncation rate |
 | Chat cost grows with conversation length | **Sliding window + summarisation of history**, structured state in DynamoDB |
 | RAG prompts are huge | Fewer chunks + **reranker**, metadata filters, smaller or hierarchical chunks |
 | Agent with 50 tools, high per-turn input tokens | Trim or select tools dynamically, short tool descriptions, cache the tool definitions |
+| Sudden spend spike from a runaway agent loop | **Cost Anomaly Detection + Budgets alerts**, max-iteration limits, per-tenant token quotas |
+| Most queries are simple, a few are complex; cut cost without hurting quality | **Tiered models / cascade / classifier router** or **Bedrock Intelligent Prompt Routing** |
+| 🎯 **PQ1** Need a small, cheap model that matches a large model on one narrow task | **Model distillation** (teacher → student) |
+| Compare models fairly on cost | **Cost per successful task** (tokens × price / success rate), not price per token |
+| Spiky or unpredictable traffic, minimise cost | **On-demand** (+ CRIS for capacity) |
+| Background enrichment that can tolerate delay, real-time API | **Flex service tier** |
+| Steady 24×7 high volume, need guaranteed capacity | **Reserved tier / Provisioned Throughput** |
+| PT model units mostly idle | Over-provisioned → reduce MUs / move to on-demand / delete no-commit PT |
+| Using a custom fine-tuned model on Bedrock | **Provisioned Throughput** (or custom model on-demand deployment where supported) |
+| Millions of documents to classify overnight, cheapest option | **Bedrock batch inference** (≈50% cheaper, JSONL in S3) |
+| Batch job with Converse format fails on records with `toolConfig` | Converse batch doesn't support tool calling → use the **InvokeModel** invocation type |
 | Self-hosted LLM GPU utilisation low | Right-size, **inference components** / multi-model packing, continuous batching |
 | SageMaker LLM endpoint scales too late (long requests) | Scale on **concurrency** metrics, lower target, faster model loading, scheduled scaling |
 | Dev/test LLM endpoint idle most of the day | Scale to zero (inference components / async endpoint) or serverless for small models |
-| Sudden spend spike from a runaway agent loop | **Cost Anomaly Detection + Budgets alerts**, max-iteration limits, per-tenant token quotas |
-| Compare models fairly on cost | **Cost per successful task** (tokens × price / success rate), not price per token |
+| Long, identical system prompt or document sent on every request; reduce cost and TTFT | **Bedrock prompt caching** (cachePoint after the stable prefix) |
+| Prompt caching enabled but `cacheReadInputTokens` always 0 | Prefix below the model's **minimum tokens**, dynamic content placed **before** the checkpoint, or a gap between calls longer than the TTL (5 min) |
+| Identical requests repeated; need deterministic reuse | **Exact-match cache** with a SHA-256 request hash (ElastiCache/DynamoDB TTL) |
+| Users ask the same question in many different phrasings | **Semantic cache**: embeddings + vector lookup in ElastiCache/MemoryDB with a similarity threshold |
+| Avoid re-summarising or re-embedding documents that haven't changed | **Result fingerprinting** (content hash) / incremental KB sync |
+| Public, non-personalised generated content served to many users | **CloudFront** / API Gateway cache |
 
 ## Flashcards
 
@@ -495,6 +476,94 @@ It's free. It returns the exact count from the model's own tokenizer, which is t
 Create an application inference profile for each team, tag it with a cost allocation tag (and activate the tag), and have each team call its own profile ARN as the modelId.
 
 *D4 · Task 4.1 · Cost attribution*
+</details>
+
+<details>
+<summary><b>Q:</b> Why is output-length control often the single biggest token saving?</summary>
+
+Output tokens are usually priced several times higher than input tokens and also drive latency. Capping `maxTokens`, using stop sequences and asking for structured or short output cuts both.
+
+*D4 · Task 4.1 · Response limiting*
+</details>
+
+<details>
+<summary><b>Q:</b> Name three ways to stop chat context costs growing linearly with conversation length.</summary>
+
+A sliding window of the last N turns, periodic summarisation of older turns with a cheap model, and keeping structured state (entities and slots in DynamoDB) instead of the full transcript.
+
+*D4 · Task 4.1 · Context pruning*
+</details>
+
+<details>
+<summary><b>Q:</b> How does a reranker reduce cost in RAG?</summary>
+
+It reorders the retrieved chunks by relevance so you can pass only the top few (e.g. 3 instead of 10) to the FM. That cuts input tokens and often improves answer quality.
+
+*D4 · Task 4.1 · Context optimisation*
+</details>
+
+<details>
+<summary><b>Q:</b> How do you detect a runaway agent loop burning tokens before the bill arrives?</summary>
+
+Per-tenant or per-app token metrics with CloudWatch alarms, AWS Cost Anomaly Detection and Budgets alerts, plus hard limits on agent iterations and maxTokens.
+
+*D4 · Task 4.1 · Cost guardrails*
+</details>
+
+<details>
+<summary><b>Q:</b> How does Bedrock Intelligent Prompt Routing decide between models?</summary>
+
+It predicts response quality for two models in the same family and sends the request to the cheaper model, unless the predicted quality gap exceeds the configured response-quality difference. Otherwise it uses the stronger model.
+
+*D4 · Task 4.1 · Tiered models*
+</details>
+
+<details>
+<summary><b>Q:</b> What metric should you use to compare models on cost?</summary>
+
+Cost per successful task: (average input tokens × input price + average output tokens × output price) ÷ success rate. Then look at quality against that cost (price-performance).
+
+*D4 · Task 4.1 · Price-performance*
+</details>
+
+<details>
+<summary><b>Q:</b> When does Provisioned Throughput make financial sense?</summary>
+
+When steady, measured utilisation is high enough that the hourly model-unit cost is less than the equivalent on-demand token spend. It's also needed for custom models that require PT. Idle PT is pure waste.
+
+*D4 · Task 4.1 · Provisioned Throughput*
+</details>
+
+<details>
+<summary><b>Q:</b> A latency-tolerant enrichment workload must stay on the real-time API, but cost matters. Which Bedrock option fits?</summary>
+
+The Flex service tier. It has a lower price in exchange for lower priority and higher latency. Batch fits only if the workload can run fully offline.
+
+*D4 · Task 4.1 · Service tiers*
+</details>
+
+<details>
+<summary><b>Q:</b> Which Bedrock option is about 50% cheaper than on-demand for large offline workloads, and what are two limitations?</summary>
+
+Batch inference (JSONL in and out of S3). It isn't supported for provisioned models, and Converse-type batch jobs don't support tool calling (use the InvokeModel type instead).
+
+*D4 · Task 4.1 · Batch inference*
+</details>
+
+<details>
+<summary><b>Q:</b> Which scaling metric works better than invocations-per-instance for SageMaker LLM endpoints, and why?</summary>
+
+Concurrency-based metrics (concurrent requests per model or copy). LLM requests run for a long and variable time, so invocation counts lag behind the real load.
+
+*D4 · Task 4.1 · Auto scaling*
+</details>
+
+<details>
+<summary><b>Q:</b> GPU utilisation on a self-hosted multi-model setup is 15%. What are two fixes?</summary>
+
+Pack several models onto shared instances with SageMaker inference components (or a multi-model endpoint), and right-size to a smaller or Inferentia instance. Enable continuous batching in the serving container.
+
+*D4 · Task 4.1 · Utilisation*
 </details>
 
 <details>
@@ -570,99 +639,11 @@ Hash each input's content, and skip re-summarising or re-embedding an item when 
 </details>
 
 <details>
-<summary><b>Q:</b> Which Bedrock option is about 50% cheaper than on-demand for large offline workloads, and what are two limitations?</summary>
-
-Batch inference (JSONL in and out of S3). It isn't supported for provisioned models, and Converse-type batch jobs don't support tool calling (use the InvokeModel type instead).
-
-*D4 · Task 4.1 · Batch inference*
-</details>
-
-<details>
-<summary><b>Q:</b> How does Bedrock Intelligent Prompt Routing decide between models?</summary>
-
-It predicts response quality for two models in the same family and sends the request to the cheaper model, unless the predicted quality gap exceeds the configured response-quality difference. Otherwise it uses the stronger model.
-
-*D4 · Task 4.1 · Tiered models*
-</details>
-
-<details>
-<summary><b>Q:</b> What metric should you use to compare models on cost?</summary>
-
-Cost per successful task: (average input tokens × input price + average output tokens × output price) ÷ success rate. Then look at quality against that cost (price-performance).
-
-*D4 · Task 4.1 · Price-performance*
-</details>
-
-<details>
-<summary><b>Q:</b> When does Provisioned Throughput make financial sense?</summary>
-
-When steady, measured utilisation is high enough that the hourly model-unit cost is less than the equivalent on-demand token spend. It's also needed for custom models that require PT. Idle PT is pure waste.
-
-*D4 · Task 4.1 · Provisioned Throughput*
-</details>
-
-<details>
-<summary><b>Q:</b> A latency-tolerant enrichment workload must stay on the real-time API, but cost matters. Which Bedrock option fits?</summary>
-
-The Flex service tier. It has a lower price in exchange for lower priority and higher latency. Batch fits only if the workload can run fully offline.
-
-*D4 · Task 4.1 · Service tiers*
-</details>
-
-<details>
-<summary><b>Q:</b> Why is output-length control often the single biggest token saving?</summary>
-
-Output tokens are usually priced several times higher than input tokens and also drive latency. Capping `maxTokens`, using stop sequences and asking for structured or short output cuts both.
-
-*D4 · Task 4.1 · Response limiting*
-</details>
-
-<details>
-<summary><b>Q:</b> Name three ways to stop chat context costs growing linearly with conversation length.</summary>
-
-A sliding window of the last N turns, periodic summarisation of older turns with a cheap model, and keeping structured state (entities and slots in DynamoDB) instead of the full transcript.
-
-*D4 · Task 4.1 · Context pruning*
-</details>
-
-<details>
-<summary><b>Q:</b> How does a reranker reduce cost in RAG?</summary>
-
-It reorders the retrieved chunks by relevance so you can pass only the top few (e.g. 3 instead of 10) to the FM. That cuts input tokens and often improves answer quality.
-
-*D4 · Task 4.1 · Context optimisation*
-</details>
-
-<details>
-<summary><b>Q:</b> Which scaling metric works better than invocations-per-instance for SageMaker LLM endpoints, and why?</summary>
-
-Concurrency-based metrics (concurrent requests per model or copy). LLM requests run for a long and variable time, so invocation counts lag behind the real load.
-
-*D4 · Task 4.1 · Auto scaling*
-</details>
-
-<details>
-<summary><b>Q:</b> GPU utilisation on a self-hosted multi-model setup is 15%. What are two fixes?</summary>
-
-Pack several models onto shared instances with SageMaker inference components (or a multi-model endpoint), and right-size to a smaller or Inferentia instance. Enable continuous batching in the serving container.
-
-*D4 · Task 4.1 · Utilisation*
-</details>
-
-<details>
 <summary><b>Q:</b> Why can't you usually edge-cache a streaming chat endpoint?</summary>
 
 The responses are personalised POST responses streamed in real time. API Gateway response-streaming mode also disables caching. Use app-level exact or semantic caches instead.
 
 *D4 · Task 4.1 · Edge caching*
-</details>
-
-<details>
-<summary><b>Q:</b> How do you detect a runaway agent loop burning tokens before the bill arrives?</summary>
-
-Per-tenant or per-app token metrics with CloudWatch alarms, AWS Cost Anomaly Detection and Budgets alerts, plus hard limits on agent iterations and maxTokens.
-
-*D4 · Task 4.1 · Cost guardrails*
 </details>
 
 ---

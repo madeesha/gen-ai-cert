@@ -8,46 +8,16 @@
 > - **Skill 3.2.3**: Create privacy-focused AI systems to protect user privacy while maintaining FM utility and effectiveness
 
 ## Key points
-- **Network isolation**: use **interface VPC endpoints (PrivateLink)** for `bedrock-runtime`, `bedrock-agent-runtime` and the others, so traffic never crosses the internet. Attach **endpoint policies** to limit which principals, actions and models can be used through each endpoint. In IAM and S3 policies, **`aws:SourceVpce`** / **`aws:SourceVpc`** enforce "only from my VPC". SageMaker uses **VPC-only Studio**, **network isolation** (`EnableNetworkIsolation`) and **inter-container traffic encryption**.
-- **Bedrock native privacy**: prompts and completions are **not used to train** AWS or third-party models and are **not shared with model providers**. Models run in **Model Deployment Accounts** owned by the Bedrock team, and **providers have no access** to them, to logs, or to prompts and completions. **TLS 1.2 is required** (1.3 recommended) and data is encrypted at rest. **Invocation logging is off by default (opt-in).**
-- **KMS customer managed keys (CMKs)** can encrypt Knowledge Bases (transient ingestion data and the data sources), agents, guardrails, custom or fine-tuned models, invocation-log S3 buckets and CloudWatch log groups. Use a CMK when the scenario needs **key control, rotation, revocation or a CloudTrail audit of key use**.
-- **Lake Formation** gives **fine-grained access** (database, table, column, row and cell) through **data filters** and **LF-tags (LF-TBAC)**. It's the answer when an FM pipeline or agent must see only *some* columns or rows of data-lake tables.
-- **Know which tool detects which PII**:
-  - **Macie** discovers PII **at rest in S3** (automated discovery plus discovery jobs, with managed and custom data identifiers).
-  - 🎯 **PQ75** **Comprehend** detects PII **in text**: `DetectPiiEntities` returns offsets, `ContainsPiiEntities` returns labels only. Real-time calls take up to **100 KB** in **English or Spanish**, and **redaction needs an async job**.
-  - **Guardrails sensitive info filters** act on **live prompts and responses**.
-- 🎯 **PQ74** 🎯 **PQ6** **Guardrails PII actions** are `BLOCK`, `ANONYMIZE` (mask, which replaces the value with `{NAME}`, `{EMAIL}` and so on) or `NONE` (detect only). Input and output can have **separate actions**. **Custom regex** patterns can be up to 500 characters and **don't support lookaround**.
-- **Guardrails masking doesn't protect three things**: (1) the **invocation logs**, where the `input` field always holds the original text, so use **CloudWatch Logs data protection**; (2) the **trace `match` field**, which shows the raw PII; (3) **tool call arguments, tool results and tool definitions**.
-- **Redact before you embed.** Any PII that gets into a vector store comes back out in retrieval. Scrub it with Comprehend, the **Glue Detect PII** transform or `ApplyGuardrail` **before chunking and embedding**.
-- **Retention**: **S3 Lifecycle** handles expiration and tiering of logs, transcripts and training data. **S3 Object Lock** (Governance or Compliance mode) gives WORM immutability for audit logs. Conversation history in DynamoDB expires with **TTL**.
-- **Privacy techniques**:
-  - **masking**: irreversible, keeps the format
-  - **tokenisation**: reversible through a token vault
-  - **pseudonymisation**: reversible with a key, and *still personal data under GDPR*
-  - **anonymisation**: irreversible, and no longer personal data
-  - **differential privacy**: statistical noise; AWS Clean Rooms supports it
-- **Multi-tenant RAG**: inject the **tenant metadata filter server-side** (never trust a filter supplied by the client), or use **separate KBs or indexes per tenant** for strict isolation.
-
-> [!IMPORTANT]
-> **🎯 Practice question 75 — 20k notes a day, 100/min, sub-second pre-processing, remove PII (EN + ES) before Bedrock, block identifiers in output, audit**
->
-> - **Amazon Comprehend PII detection** (real time, **English and Spanish**) → **redact** the detected spans before calling Bedrock. Call `DetectPiiEntities`, replace the returned offsets in code, and log each redaction.
-> - **Bedrock Guardrails** on the **output** → block medical identifiers in the summaries.
-> - **Store the redacted input and output logs in S3** → audit visibility for every redacted field.
-> - ❌ **Glue DataBrew one-time masking + Lake Formation:** batch, misses each day's new notes, and LF can't filter FM output.
-> - ❌ **Comprehend + a fine-tuned Bedrock model as a second detector:** extra latency, and Comprehend already covers EN and ES.
-> - ❌ **Macie + WAF + DynamoDB:** Macie isn't a real-time detector, and WAF can't filter FM output.
-> - 🔁 **Compare with PQ60:** there, *flag* PII (no redaction) in a real-time gate. Here, *remove* it, which you do yourself from the **real-time detection offsets**. Comprehend's built-in **redaction mode runs as an asynchronous batch job**.
-
-> [!IMPORTANT]
-> **🎯 Practice question 74 — the input is de-identified, but 3–5% of outputs still contain names and record numbers that weren't in the input**
->
-> - The model is **making up** identifiers that look real. It isn't leaking them from the input, so fixing the **input** won't help.
-> - → **Guardrails sensitive information filters on the *output*** (block or mask NAME, custom regex for medical record numbers, and so on). Guardrail traces and invocation logs give the **audit record of PII decisions**, and it fits the <500 ms budget.
-> - ❌ **Session isolation / clearing history:** the problem isn't data carried over between sessions.
-> - ❌ **Better *input* detection (regex + custom entities):** the identifiers weren't in the input.
-> - ❌ **Removing medical detail from inputs:** defeats the purpose and doesn't stop made-up identifiers.
-> - 🔁 **Cue:** *"PII appears that wasn't in the input"* → **filter the output**.
+- **Protected environment = layers:** network (VPC endpoints) → endpoint policy → IAM → data (Lake Formation) → encryption (KMS) → detection (CloudTrail, CloudWatch, Macie) → 3.2.1.
+- **VPC endpoint ≠ access control on its own:** the endpoint gives a private path; the **endpoint policy** limits what goes through it, and **`aws:SourceVpce` / `aws:SourceVpc`** conditions force callers to use it → 3.2.1.
+- **"Only some columns or rows" → Lake Formation** (data filters, LF-tags), not S3 or IAM policies, which stop at object/prefix level → 3.2.1.
+- **Bedrock's native privacy is the baseline:** no training on your data, providers can't see prompts, invocation logging is opt-in. Add a **KMS CMK** when the scenario needs key control or revocation → 3.2.2.
+- 🎯 **PQ75** **Which PII tool:** **Macie** = PII at rest in S3 · **Comprehend** = PII in any text in the pipeline (real-time detect, async redaction) · **Guardrails** = live prompts and responses → 3.2.2.
+- 🎯 **PQ74** **"PII appears that wasn't in the input" → filter the output**; PII the user sends → filter or mask the input → 3.2.2.
+- **Guardrails masking has blind spots** (invocation logs, the trace, tool traffic) → protect logs with **CloudWatch Logs data protection**, validate tools in their Lambda → 3.2.2.
+- **Retention:** S3 Lifecycle deletes, S3 Object Lock keeps (WORM), DynamoDB TTL expires history; fine-tuned weights can't forget → 3.2.2.
+- **Privacy vs utility:** one-way masking when identity doesn't matter; **tokenisation / pseudonymisation** when the model must track "the same person" or real values must be restored → 3.2.3.
+- **Privacy-safe RAG:** redact **before embedding**, and inject the tenant filter **server-side** (or isolate per tenant) → 3.2.3.
 
 ## Notes
 
@@ -65,6 +35,8 @@
 | Data | Fine-grained data-lake access | Lake Formation permissions, data filters, LF-tags |
 | Encryption | At rest + in transit, customer key control | KMS CMKs, TLS 1.2+ (Bedrock requires TLS 1.2, recommends 1.3), FIPS endpoints |
 | Detection | Who accessed what, when | CloudTrail (management + data events), CloudWatch metrics/alarms/Logs, Macie, GuardDuty, Security Hub |
+
+The sections below go through the layers in that order.
 
 #### VPC endpoints (PrivateLink) for Bedrock and SageMaker
 - Bedrock has **separate interface endpoints for each API family**: control plane (`bedrock`), runtime (`bedrock-runtime`), agents build-time (`bedrock-agent`) and agents runtime (`bedrock-agent-runtime`), plus newer ones. The full list and the FIPS variants are in [Task 2.3](../domain-2-implementation-integration/03-task-2.3-enterprise-integration-architectures.md). Create **only the endpoints your app calls**. Most apps need **`bedrock-runtime`**, and RAG or agent apps also need **`bedrock-agent-runtime`**.
@@ -99,7 +71,8 @@
 > ⚠️ The Converse and ConverseStream APIs are authorised with the **`bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` IAM actions** (verify in docs for any new actions). If you call through a **cross-Region inference profile**, the policy must allow **both the inference-profile ARN and the foundation-model ARN in every destination Region**.
 
 #### IAM data access patterns
-- **Least privilege on models**: scope `bedrock:InvokeModel` to specific foundation-model or inference-profile ARNs, and don't use `Resource: "*"`. If a team may only use approved models, deny everything else with an SCP.
+The endpoint policy limits what goes *through* the endpoint; IAM conditions make sure callers *use* it, and scope what each principal can touch.
+- **Least privilege on models**: scope `bedrock:InvokeModel` to specific foundation-model or inference-profile ARNs, and don't use `Resource: "*"`. If a team may only use approved models, deny everything else with an SCP. (Full policy patterns → [Task 2.3 · Skill 2.3.3](../domain-2-implementation-integration/03-task-2.3-enterprise-integration-architectures.md#skill-233--secure-access-frameworks).)
 - **Force calls to come from the VPC**: deny when the request doesn't arrive through your endpoint. In an identity policy, use `aws:SourceVpce` for the specific endpoint or `aws:SourceVpc` for the VPC.
 
 ```json
@@ -124,13 +97,13 @@
 
 #### AWS Lake Formation: granular data access for GenAI pipelines 🎯 PQ20
 - Lake Formation is a central permission layer over the **Glue Data Catalog** and S3 data lakes. Services that respect it include Athena, Redshift Spectrum, EMR, Glue and SageMaker.
+- **Lake Formation vs IAM/S3 policies**: S3 policies work at **object or prefix** granularity. Lake Formation understands **tables, columns and rows**. If the scenario says "only certain columns" or "only rows for region X", the answer is **Lake Formation**.
 - **Permission levels**: database, table, **column** (include or exclude), **row** (row filter expression) and **cell** (row and column together), using **data filters**.
 - 🎯 **PQ53** **LF-TBAC (tag-based access control)**: put LF-tags such as `sensitivity=pii` or `domain=hr` on databases, tables and columns, then grant on tag expressions. This scales to thousands of tables.
 - **GenAI use cases**:
   - **Text-to-SQL agents** or tools that query the lake through Athena. The agent's role sees only permitted columns and rows, so the FM can't leak a salary column it never receives.
   - **Building training or fine-tuning datasets** from the lake while excluding PII columns.
   - 🎯 **PQ5** **Cross-account data sharing** to an ML account through LF grants or RAM.
-- **Lake Formation vs IAM/S3 policies**: S3 policies work at **object or prefix** granularity. Lake Formation understands **tables, columns and rows**. If the scenario says "only certain columns" or "only rows for region X", the answer is **Lake Formation**.
 
 > [!WARNING]
 > **🎯 Practice question 53 — app in Account C needs data from A (transactions) and B (PII), 10 accounts soon, only the needed columns**
@@ -158,12 +131,12 @@
 > - ❌ **Docker on EC2 + Auto Scaling:** you run the infrastructure yourself, which isn't least overhead.
 
 #### Monitoring data access
-- **CloudTrail management events** (on by default for 90 days in Event history) record control-plane calls such as CreateKnowledgeBase, CreateGuardrail and PutModelInvocationLoggingConfiguration. Whether runtime calls (InvokeModel, Converse, Retrieve, InvokeAgent) count as management or data events differs by API, so verify in docs. Enable **data events** for Bedrock resource types where they're offered, and for **S3 object-level access** to training and KB buckets.
+- **CloudTrail management events** (on by default for 90 days in Event history) record control-plane calls such as CreateKnowledgeBase, CreateGuardrail and PutModelInvocationLoggingConfiguration. Whether runtime calls (InvokeModel, Converse, Retrieve, InvokeAgent) count as management or data events differs by API, so verify in docs. Enable **data events** for Bedrock resource types where they're offered, and for **S3 object-level access** to training and KB buckets. (CloudTrail in full → [Task 3.3 · Skill 3.3.2](03-task-3.3-governance-compliance.md#skill-332--data-source-tracking-and-traceability).)
 - **CloudTrail Lake** or Athena over trail logs answers questions like "who called this model, from where, how often".
 - **Bedrock model invocation logging** (opt-in) records the full request and response bodies plus token counts to **CloudWatch Logs and/or S3**. Bodies up to **100 KB** go inline; anything larger or binary goes to S3. This is your record of *what data was sent to the FM*. **Treat these logs as sensitive data in their own right** and protect them with a KMS CMK, tight IAM, CloudWatch Logs data protection and retention settings.
 - **CloudWatch**: Bedrock runtime metrics (`Invocations`, `InvocationClientErrors`, `InputTokenCount` and others, by `ModelId`). Use **metric filters and alarms** on unusual volumes, for example a spike in invocations from one principal, which could be exfiltration through prompts.
 - **CloudWatch Logs data protection policies** detect and **mask** sensitive data such as PII and credentials in log groups as it's ingested. Only principals with `logs:Unmask` see the raw values. This is the fix for PII in invocation logs.
-- **Macie**: continuous discovery of sensitive data in the S3 buckets that feed RAG or training.
+- **Macie**: continuous discovery of sensitive data in the S3 buckets that feed RAG or training (detail in 3.2.2).
 - **GuardDuty**: S3 protection and anomalous API detection, for example credential misuse calling Bedrock from an unusual location. Verify in docs which Bedrock-specific GuardDuty findings exist.
 - **Security Hub / AWS Config**: posture checks, for example Config rules to confirm buckets are encrypted and endpoints exist.
 
@@ -177,6 +150,8 @@
 ### Skill 3.2.2 — Privacy-preserving systems (PII detection, Bedrock privacy, Guardrails, retention)
 
 > *Develop privacy-preserving systems to protect sensitive information during FM interactions (for example, by using Amazon Comprehend and Amazon Macie to detect personally identifiable information [PII], Amazon Bedrock native data privacy features, Amazon Bedrock guardrails to filter outputs, Amazon S3 Lifecycle configurations to implement data retention policies).*
+
+This skill is the home for PII handling. Start with where PII can appear, then what Bedrock already does for you, then the three detection tools, then retention.
 
 #### Where PII appears in a GenAI system, and which control fits
 
@@ -196,7 +171,7 @@
 - **No training on your data**: Bedrock doesn't use your prompts and completions to train AWS or third-party models, and doesn't share them with model providers.
 - **Model Deployment Accounts**: there's **one per model provider in each Region**, **owned and operated by the Bedrock service team**. Bedrock makes a deep copy of the provider's inference and training software into these accounts. **Model providers have no access** to them, so they **can't see Bedrock logs or customer prompts and completions**.
 - **Encryption in transit**: **TLS 1.2 required, TLS 1.3 recommended**. **FIPS 140-3 endpoints** are available for regulated workloads.
-- **Encryption at rest**: on by default with AWS-owned or AWS managed keys. You can use **customer managed KMS keys** for guardrails, KBs, agents, custom models and the logging destinations.
+- **Encryption at rest**: on by default with AWS-owned or AWS managed keys. You can use **customer managed KMS keys** for guardrails, Knowledge Bases (transient ingestion data and the data sources), agents, custom models and the logging destinations (invocation-log S3 buckets and CloudWatch log groups). Choose a CMK when the scenario needs **key control, rotation, revocation or a CloudTrail audit of key use**.
 - **Fine-tuning and customisation**: the customised model copy is **private to your account**. The base model isn't changed and your training data isn't used to improve the base model. The custom model can be encrypted with your CMK.
 - **Invocation logging is opt-in**, so by default Bedrock doesn't put your prompt bodies anywhere you can see them. If you turn it on, you take on protecting those logs.
 - **Abuse detection**: Bedrock runs automated abuse detection. Some models may retain data for a limited time for safety reasons; check each model's terms.
@@ -208,6 +183,9 @@
   - This is new, so it may not appear on the exam. If you see "guarantee zero retention of prompts", it's the answer.
 - **Compliance**: Bedrock is in scope for common programmes, including HIPAA eligibility, SOC, ISO and GDPR support. Check AWS Artifact for current scope (verify in docs for specific programmes).
 - Don't put sensitive data in **tags or free-text Name fields**. They can appear in billing and diagnostic logs.
+
+#### Choosing a PII tool
+**Exam split**: **Macie = S3 at rest, finds where PII lives**. **Comprehend = arbitrary text in the pipeline or at runtime, finds and redacts.** **Guardrails = live FM prompts and responses.** Each is covered below.
 
 #### Amazon Comprehend: PII detection in text (checked against the AWS docs)
 
@@ -238,13 +216,24 @@ def redact(text: str, threshold: float = 0.8) -> str:
     return text
 ```
 
+> [!IMPORTANT]
+> **🎯 Practice question 75 — 20k notes a day, 100/min, sub-second pre-processing, remove PII (EN + ES) before Bedrock, block identifiers in output, audit**
+>
+> - **Amazon Comprehend PII detection** (real time, **English and Spanish**) → **redact** the detected spans before calling Bedrock. Call `DetectPiiEntities`, replace the returned offsets in code, and log each redaction.
+> - **Bedrock Guardrails** on the **output** → block medical identifiers in the summaries.
+> - **Store the redacted input and output logs in S3** → audit visibility for every redacted field.
+> - ❌ **Glue DataBrew one-time masking + Lake Formation:** batch, misses each day's new notes, and LF can't filter FM output.
+> - ❌ **Comprehend + a fine-tuned Bedrock model as a second detector:** extra latency, and Comprehend already covers EN and ES.
+> - ❌ **Macie + WAF + DynamoDB:** Macie isn't a real-time detector, and WAF can't filter FM output.
+> - 🔁 **Compare with PQ60:** there, *flag* PII (no redaction) in a real-time gate. Here, *remove* it, which you do yourself from the **real-time detection offsets**. Comprehend's built-in **redaction mode runs as an asynchronous batch job**.
+
 #### Amazon Macie: PII discovery at rest in S3
 - Macie is a managed service that uses ML and pattern matching to **discover sensitive data in S3** and to assess bucket security (public access, encryption, sharing).
 - **Automated sensitive data discovery** continuously samples objects across the estate and produces a sensitivity score for each bucket.
 - **Sensitive data discovery jobs** are targeted scans, one-off or scheduled, of chosen buckets or prefixes.
 - **Managed data identifiers** are built in (PII, financial data, credentials). **Custom data identifiers** use regex plus keywords, for example employee IDs. **Allow lists** suppress known false positives.
 - Findings go to **EventBridge** and **Security Hub**, so you can automate a response: EventBridge → Lambda/Step Functions to quarantine the object, tag it, or block KB ingestion of that prefix.
-- **Exam split**: **Macie = S3 at rest, finds where PII lives**. **Comprehend = arbitrary text in the pipeline or at runtime, finds and redacts.** **Guardrails = live FM prompts and responses.**
+- **AWS Glue sensitive data detection (Detect PII transform)** in Glue Studio ETL finds PII in **tabular or columnar** data and can redact it, hash it or report it. Use it for structured data feeding text-to-SQL or fine-tuning datasets.
 
 **Pattern: block PII from reaching the KB**
 
@@ -257,12 +246,10 @@ S3 landing bucket ──► Macie job / EventBridge(Object Created) ──► St
 S3 clean bucket ──► Bedrock KB data source ──► StartIngestionJob ──► vector store
 ```
 
-- **AWS Glue sensitive data detection (Detect PII transform)** in Glue Studio ETL finds PII in **tabular or columnar** data and can redact it, hash it or report it. Use it for structured data feeding text-to-SQL or fine-tuning datasets.
-
 #### Bedrock Guardrails: sensitive information filters (checked against the AWS docs)
-The full guardrail design (content filters, denied topics, word filters, contextual grounding, Automated Reasoning) is in [Task 3.1](01-task-3.1-input-output-safety-controls.md). For privacy, these are the parts to know:
+The full guardrail design (anatomy, tiers, content filters, denied topics, word filters, contextual grounding, Automated Reasoning) is in [Task 3.1 · Skill 3.1.1](01-task-3.1-input-output-safety-controls.md#skill-311--content-safety-systems-for-harmful-user-inputs). For privacy, these are the parts to know:
 - The filter is **probabilistic and ML-based**, so it uses context. It works better with more surrounding text and worse on single words. It detects PII in **natural language and in code** (variable names, hard-coded credentials, comments).
-- **Actions**:
+- 🎯 **PQ6** **Actions**:
   - `BLOCK`: return the configured blocked message instead of the content.
   - `ANONYMIZE` (shown as "Mask" in the console): replace the value with `{NAME}`, `{EMAIL}` and so on.
   - `NONE` (detect mode): take no action but return detection info in the trace. Use it for dry runs and tuning.
@@ -277,7 +264,6 @@ The full guardrail design (content filters, denied topics, word filters, context
   1. **Invocation logs**: the `input` field always holds the **original, unmasked request**. Use **CloudWatch Logs data protection** for those logs.
   2. The **trace `match` field** in `GuardrailPiiEntityFilter` contains the **raw PII value**. This is by design, but don't log the trace without protecting it.
   3. **Tool use is not evaluated**: PII in `toolUse.input`, `toolResult` or `toolSpec` passes through untouched. Validate inside the tool Lambda.
-- **KMS CMK** on the guardrail, and **cross-Region inference for the guardrail** using guardrail profiles.
 - **`ApplyGuardrail` API**: run the guardrail on **any text, without calling a model**. Examples: redact text before it's written to DynamoDB history, scrub documents before embedding, or apply the guardrail to output from a SageMaker or third-party model.
 
 ```python
@@ -290,7 +276,18 @@ if resp["action"] == "GUARDRAIL_INTERVENED":
     safe_text = resp["outputs"][0]["text"]   # masked text (if ANONYMIZE) or blocked message
 ```
 
+> [!IMPORTANT]
+> **🎯 Practice question 74 — the input is de-identified, but 3–5% of outputs still contain names and record numbers that weren't in the input**
+>
+> - The model is **making up** identifiers that look real. It isn't leaking them from the input, so fixing the **input** won't help.
+> - → **Guardrails sensitive information filters on the *output*** (block or mask NAME, custom regex for medical record numbers, and so on). Guardrail traces and invocation logs give the **audit record of PII decisions**, and it fits the <500 ms budget.
+> - ❌ **Session isolation / clearing history:** the problem isn't data carried over between sessions.
+> - ❌ **Better *input* detection (regex + custom entities):** the identifiers weren't in the input.
+> - ❌ **Removing medical detail from inputs:** defeats the purpose and doesn't stop made-up identifiers.
+> - 🔁 **Cue:** *"PII appears that wasn't in the input"* → **filter the output**.
+
 #### Data retention with S3 Lifecycle, Object Lock and TTL
+Detection and masking cover data in flight; retention decides how long whatever you do store survives.
 - **S3 Lifecycle** **transitions** objects to cheaper classes (Standard-IA, Glacier Instant/Flexible Retrieval, Deep Archive) and **expires** them (deletes current and noncurrent versions, and cleans up incomplete multipart uploads). It enforces "keep prompt logs for 90 days, then delete".
 
 ```json
@@ -353,7 +350,7 @@ User prompt ─► Lambda (Comprehend DetectPiiEntities)
 - **The vault is now the sensitive asset.** Protect it with a separate KMS key, restricted IAM (only the re-hydration Lambda can read it), TTL and CloudTrail data events.
 
 #### Privacy-safe RAG
-1. **Redact or tokenise before chunking and embedding.** Embeddings of PII can leak through retrieval, and arguably through the vectors themselves. The tools are Comprehend async redaction jobs, Glue Detect PII and `ApplyGuardrail`.
+1. **Redact or tokenise before chunking and embedding.** Any PII that gets into a vector store comes back out in retrieval, and arguably leaks through the vectors themselves. The tools are Comprehend async redaction jobs, Glue Detect PII and `ApplyGuardrail`.
 2. **Use metadata for access control, not just relevance**:
    - Tag each document with `tenant_id`, `department` and `classification` in a `.metadata.json` sidecar (see [Task 1.4](../domain-1-fm-integration-data-compliance/04-task-1.4-vector-store-solutions.md)).
    - **Inject the filter on the server side** from the authenticated identity (a Cognito claim or the IAM principal tag). **Never take the filter from the client request.**
@@ -386,7 +383,7 @@ agent_rt.retrieve(
 - **Mask with type labels** (`{NAME}`, `[DATE]`) instead of blanks, so the model keeps the sentence structure.
 - **Apply masking selectively** by entity type. Mask `SSN` and `CREDIT_DEBIT_NUMBER`, but perhaps keep `DATE_TIME` for a timeline summary. Configure this per guardrail or per Comprehend entity list.
 - **Tune the confidence threshold** and use Guardrails **detect mode (`NONE`)** in a pilot to measure false positives before switching to ANONYMIZE or BLOCK.
-- **Asymmetric policies**: input ANONYMIZE keeps the conversation going, while output BLOCK on credentials stops leaks.
+- **Asymmetric policies** (3.2.2): input ANONYMIZE keeps the conversation going, while output BLOCK on credentials stops leaks.
 - **Use different guardrail versions for different audiences**, for example an internal analyst who is allowed to see names versus a public chatbot.
 - **Evaluate the impact**: compare answer quality on masked and unmasked evaluation sets (Bedrock model evaluation, LLM-as-a-judge) so you can show that privacy controls haven't broken the task. See Domain 5 notes.
 - **Fine-tuning data**: pseudonymise or generate synthetic data, document it in model cards (Task 3.3), and don't train on personal data you might have to erase.
@@ -411,6 +408,9 @@ agent_rt.retrieve(
 | Studio users must not reach the internet | SageMaker domain in **VpcOnly** mode + VPC endpoints |
 | Agent queries data lake; must not see salary column or other regions' rows | **Lake Formation** column/row-level **data filters** (LF-tags at scale) |
 | Thousands of tables, permission by sensitivity classification | **LF-TBAC (LF-tags)** |
+| Concern that model providers can see prompts | **Model Deployment Accounts** – providers have no access; no training on customer data |
+| Regulator requires customer-controlled, revocable encryption keys | **KMS customer managed keys** on KB, agents, guardrails, custom models, log buckets |
+| Organisation must guarantee zero retention of prompts/completions | Bedrock **data retention mode `none`** enforced with SCP on `bedrock:DataRetentionMode` |
 | Find which S3 buckets feeding the KB contain PII | **Amazon Macie** (automated discovery / discovery job) |
 | Detect and redact PII in text documents in bulk before ingestion | **Comprehend async PII job** (`ONLY_REDACTION`) or **Glue Detect PII** for tabular |
 | Quick yes/no "does this prompt contain PII?" with no offsets needed | **Comprehend `ContainsPiiEntities`** |
@@ -424,16 +424,13 @@ agent_rt.retrieve(
 | PII still visible in CloudWatch invocation logs despite guardrail masking | **CloudWatch Logs data protection policy** (masking is not applied to logs) |
 | PII passed as agent tool arguments not masked | Guardrails don't evaluate tool use → **validate/redact in tool Lambda** |
 | Redact text without invoking an FM (e.g., before storing history) | **`ApplyGuardrail` API** |
-| Concern that model providers can see prompts | **Model Deployment Accounts** – providers have no access; no training on customer data |
-| Regulator requires customer-controlled, revocable encryption keys | **KMS customer managed keys** on KB, agents, guardrails, custom models, log buckets |
-| Organisation must guarantee zero retention of prompts/completions | Bedrock **data retention mode `none`** enforced with SCP on `bedrock:DataRetentionMode` |
 | Keep prompt logs 90 days then delete automatically | **S3 Lifecycle expiration** (+ CloudWatch Logs retention) |
 | Audit evidence must be immutable for 7 years | **S3 Object Lock – Compliance mode** |
 | Conversation history must expire automatically | **DynamoDB TTL** |
+| Right to be forgotten for RAG data | Delete source doc → **re-sync KB**; avoid PII in fine-tuning data |
 | FM must reason about "same customer" across turns; real values restored for authorised staff | **Tokenisation** with KMS-protected DynamoDB vault + re-hydration Lambda |
 | Share aggregate insights across organisations without exposing individuals | **AWS Clean Rooms differential privacy** |
 | Multi-tenant RAG – tenant A must never retrieve tenant B's chunks | **Server-side metadata filter** from auth claims; KB/index per tenant for strict isolation |
-| Right to be forgotten for RAG data | Delete source doc → **re-sync KB**; avoid PII in fine-tuning data |
 
 ## Flashcards
 
@@ -462,6 +459,14 @@ The container gets no outbound network access at all, not even to S3, and SageMa
 </details>
 
 <details>
+<summary><b>Q:</b> An agent queries an Athena table but must not see the <code>ssn</code> column or rows outside the EU. What should you use?</summary>
+
+AWS Lake Formation data filters: column exclusion plus a row filter expression, granted to the agent's role. At scale, use LF-tags (LF-TBAC).
+
+*D3 · Task 3.2 · Lake Formation*
+</details>
+
+<details>
 <summary><b>Q:</b> Do model providers on Bedrock have access to customer prompts?</summary>
 
 No. Models run in Model Deployment Accounts, one per provider per Region, owned and operated by the Bedrock team. Providers have no access to those accounts, the logs, or prompts and completions. Customer data isn't used to train the models.
@@ -478,11 +483,19 @@ TLS 1.2 is required and TLS 1.3 is recommended. FIPS 140-3 endpoints exist for r
 </details>
 
 <details>
-<summary><b>Q:</b> An agent queries an Athena table but must not see the <code>ssn</code> column or rows outside the EU. What should you use?</summary>
+<summary><b>Q:</b> Which Bedrock resources can you encrypt with a customer managed KMS key?</summary>
 
-AWS Lake Formation data filters: column exclusion plus a row filter expression, granted to the agent's role. At scale, use LF-tags (LF-TBAC).
+Guardrails, Knowledge Bases (transient ingestion data and data sources), agents, custom or fine-tuned models, and the S3 buckets and CloudWatch log groups used for invocation logging. Batch and customisation job outputs in S3 can be encrypted too.
 
-*D3 · Task 3.2 · Lake Formation*
+*D3 · Task 3.2 · KMS*
+</details>
+
+<details>
+<summary><b>Q:</b> How can an organisation ensure Bedrock never retains prompts or completions?</summary>
+
+Set the Bedrock data retention mode to `none` for each Region and enforce it with an SCP that denies `PutAccountDataRetention` unless `bedrock:DataRetentionMode` is `none`. Models that require retention then become unavailable and return a `ValidationException`. This is a newer feature.
+
+*D3 · Task 3.2 · Data retention*
 </details>
 
 <details>
@@ -518,6 +531,14 @@ Run an asynchronous `StartPiiEntitiesDetectionJob` with `Mode=ONLY_REDACTION` an
 </details>
 
 <details>
+<summary><b>Q:</b> What are the limits on Guardrails custom regex patterns?</summary>
+
+The pattern can be 1–500 characters and the name 1–100 characters. Lookaround isn't supported. Each regex can have its own input and output actions.
+
+*D3 · Task 3.2 · Custom regex*
+</details>
+
+<details>
 <summary><b>Q:</b> Guardrails mask PII in responses, but auditors find raw PII in CloudWatch. Why, and what's the fix?</summary>
 
 Guardrails masking doesn't apply to model invocation logs; the `input` field always holds the original request. Apply a CloudWatch Logs data protection policy to the log group, plus KMS and restricted access.
@@ -534,14 +555,6 @@ No. Sensitive information filters don't evaluate `toolUse.input`, `toolResult` o
 </details>
 
 <details>
-<summary><b>Q:</b> What are the limits on Guardrails custom regex patterns?</summary>
-
-The pattern can be 1–500 characters and the name 1–100 characters. Lookaround isn't supported. Each regex can have its own input and output actions.
-
-*D3 · Task 3.2 · Custom regex*
-</details>
-
-<details>
 <summary><b>Q:</b> How do you redact text with a guardrail without calling an FM?</summary>
 
 Use the `ApplyGuardrail` API with `source` set to INPUT or OUTPUT. It returns the masked text when the guardrail intervenes. This is useful before saving conversation history or embedding documents, and for models outside Bedrock.
@@ -550,19 +563,19 @@ Use the `ApplyGuardrail` API with `source` set to INPUT or OUTPUT. It returns th
 </details>
 
 <details>
-<summary><b>Q:</b> Why redact PII before ingesting into a Knowledge Base, rather than only filtering outputs?</summary>
+<summary><b>Q:</b> Prompt logs in S3 must be kept for 1 year and then deleted, and audit records must be immutable for 7 years. What should you use?</summary>
 
-Whatever is embedded can come back out through retrieval to any user who can query the KB. Output filters are probabilistic backstops. Redacting at the source removes the risk and keeps vectors and logs clean.
+An S3 Lifecycle expiration rule for the logs (optionally with transitions to Glacier). S3 Object Lock in Compliance mode for the audit records.
 
-*D3 · Task 3.2 · Privacy-safe RAG*
+*D3 · Task 3.2 · Retention*
 </details>
 
 <details>
-<summary><b>Q:</b> In multi-tenant RAG, how should you apply the tenant filter?</summary>
+<summary><b>Q:</b> A user asks to have their data deleted, and it was used for RAG and fine-tuning. What's the problem?</summary>
 
-On the server side. Take `tenant_id` from the authenticated identity (a Cognito claim or principal tag) and inject it into the Retrieve metadata filter. Never accept it from the client. For strict isolation, use a separate KB or index per tenant.
+For RAG, you delete the source documents and re-sync the KB to remove the vectors. A fine-tuned model can't have specific data removed from its weights; you'd have to retrain without that data. So avoid fine-tuning on personal data.
 
-*D3 · Task 3.2 · Multi-tenant*
+*D3 · Task 3.2 · Right to erasure*
 </details>
 
 <details>
@@ -590,19 +603,19 @@ AWS Clean Rooms, through its differential privacy feature.
 </details>
 
 <details>
-<summary><b>Q:</b> Prompt logs in S3 must be kept for 1 year and then deleted, and audit records must be immutable for 7 years. What should you use?</summary>
+<summary><b>Q:</b> Why redact PII before ingesting into a Knowledge Base, rather than only filtering outputs?</summary>
 
-An S3 Lifecycle expiration rule for the logs (optionally with transitions to Glacier). S3 Object Lock in Compliance mode for the audit records.
+Whatever is embedded can come back out through retrieval to any user who can query the KB. Output filters are probabilistic backstops. Redacting at the source removes the risk and keeps vectors and logs clean.
 
-*D3 · Task 3.2 · Retention*
+*D3 · Task 3.2 · Privacy-safe RAG*
 </details>
 
 <details>
-<summary><b>Q:</b> How can an organisation ensure Bedrock never retains prompts or completions?</summary>
+<summary><b>Q:</b> In multi-tenant RAG, how should you apply the tenant filter?</summary>
 
-Set the Bedrock data retention mode to `none` for each Region and enforce it with an SCP that denies `PutAccountDataRetention` unless `bedrock:DataRetentionMode` is `none`. Models that require retention then become unavailable and return a `ValidationException`. This is a newer feature.
+On the server side. Take `tenant_id` from the authenticated identity (a Cognito claim or principal tag) and inject it into the Retrieve metadata filter. Never accept it from the client. For strict isolation, use a separate KB or index per tenant.
 
-*D3 · Task 3.2 · Data retention*
+*D3 · Task 3.2 · Multi-tenant*
 </details>
 
 <details>
@@ -611,22 +624,6 @@ Set the Bedrock data retention mode to `none` for each Region and enforce it wit
 It's probabilistic and can be bypassed with prompt injection or jailbreaks. Use deterministic controls instead: redaction at ingestion, Guardrails sensitive information filters, post-processing validation and IAM data scoping.
 
 *D3 · Task 3.2 · Anti-patterns*
-</details>
-
-<details>
-<summary><b>Q:</b> A user asks to have their data deleted, and it was used for RAG and fine-tuning. What's the problem?</summary>
-
-For RAG, you delete the source documents and re-sync the KB to remove the vectors. A fine-tuned model can't have specific data removed from its weights; you'd have to retrain without that data. So avoid fine-tuning on personal data.
-
-*D3 · Task 3.2 · Right to erasure*
-</details>
-
-<details>
-<summary><b>Q:</b> Which Bedrock resources can you encrypt with a customer managed KMS key?</summary>
-
-Guardrails, Knowledge Bases (transient ingestion data and data sources), agents, custom or fine-tuned models, and the S3 buckets and CloudWatch log groups used for invocation logging. Batch and customisation job outputs in S3 can be encrypted too.
-
-*D3 · Task 3.2 · KMS*
 </details>
 
 ---
