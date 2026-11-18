@@ -11,17 +11,15 @@
 > - Skill 2.5.6: Troubleshooting FM applications (CloudWatch Logs Insights, X-Ray, Q Developer)
 
 ## Key points
-- **GenAI APIs are not ordinary APIs.** Responses are slow (seconds to minutes) and long, and you pay per token. Design for **streaming**, **long timeouts**, **token budgets** and **idempotent retries**. A synchronous REST API Gateway call has a **29 s default integration timeout**. For long generations use **streaming** (Lambda response streaming / WebSocket API / REST API response streaming), or go **async** (SQS + job ID + polling/callback).
-- **Token limit management** = count or estimate before you call (**CountTokens** API / tokenizer heuristics), cap output with `inferenceConfig.maxTokens`, detect `stopReason: "max_tokens"` (truncated, so continue or summarise), and trim conversation history (sliding window + **summarise older turns**). Exceeding the context window → **`ValidationException`**. It is not retryable, so fix the input.
-- **Retry the right errors.** `ThrottlingException`, `ModelTimeoutException`, `ServiceUnavailableException`, `InternalServerException` and `ModelNotReadyException` → retry with **exponential backoff + jitter** (SDK `standard`/`adaptive` retry mode). `ValidationException` and `AccessDeniedException` → **don't retry**. Raise the SDK **read timeout** for long generations (the boto3 default is 60 s).
-- **Amplify Gen 2 AI Kit**: **conversation routes** (`a.conversation`) are async, multi-turn chat with history **stored in DynamoDB** and responses streamed over **AppSync subscriptions**. **Generation routes** (`a.generation`) are a single **synchronous** request → **structured output** (AppSync query). UI: `<AIConversation>` + `useAIConversation` / `useAIGeneration` from `@aws-amplify/ui-react-ai`.
-- **API-first with OpenAPI**: one spec drives API Gateway import, SDK/client generation, docs, mocks, contract tests, and **Bedrock Agents action groups**. The agent reads `description`/`operationId`/parameter descriptions to decide **when and how** to call an API, so descriptions matter.
-- **No-code / low-code**: **Bedrock Flows** (formerly Prompt Flows) is a visual builder that chains prompts, KBs, agents, Lambda, conditions and iterators. You deploy it as a versioned **alias** and call it with `InvokeFlow`. More depth is in [Task 1.6](../domain-1-fm-integration-data-compliance/06-task-1.6-prompt-engineering-governance.md).
-- **Business enhancements**: CRM events → EventBridge → **Lambda** → Bedrock (summarise case, draft reply, classify lead) → write back to the CRM. Document pipelines → **Step Functions** orchestrating **Textract → Comprehend → Bedrock → A2I/human → DB**. Multimodal IDP with minimal orchestration → **Bedrock Data Automation (BDA)**.
-- **BDA**: **standard output** (default summaries, transcripts, scene descriptions) vs **custom output** via **blueprints**, which list the fields to extract (documents, images, audio). Blueprints come from the catalog or you create your own. **Projects** group configs and are passed to **`InvokeDataAutomationAsync`**, which writes results to **S3**. BDA can also be a **KB parser**.
-- **Amazon Q Developer**: inline suggestions, chat, **agentic coding**, `/test` (unit tests), `/review` (code review + security scan), `/doc` (README/docs), `/transform` (Java 8/11 → 17/21, .NET Framework → cross-platform .NET), MCP servers, and "**Diagnose with Amazon Q**" for console errors. ⚠️ The IDE plugins reach **end of support on 30 April 2027** (successor: **Kiro**). The exam still names Q Developer.
-- **Agent design patterns on Step Functions**: **prompt chaining** (sequential Task states) · **routing** (Choice on a classifier output) · **parallelisation** (Parallel/Map, then aggregate) · **orchestrator-workers** · **evaluator-optimizer** (generate → judge → loop with a max-iteration counter). Open-ended autonomy belongs to **Strands / Bedrock Agents / AgentCore**. Deterministic, auditable steps belong to **Step Functions**.
-- **Troubleshooting stack**: **Model invocation logging** (off by default; CloudWatch Logs and/or S3; bodies ≤ **100 KB inline**, larger/binary → S3) + **Logs Insights** over `identity.arn`, `modelId`, `input.inputTokenCount`, `output.outputTokenCount` · **CloudWatch `AWS/Bedrock` metrics** (latency, throttles, errors, tokens) · **X-Ray/ADOT** traces across API GW → Lambda → Bedrock · **CloudTrail** for who called what, with error codes · **CloudWatch GenAI observability** dashboards for model and agent traces.
+- **GenAI APIs are not ordinary APIs:** slow, long, priced per token and non-deterministic. Choose the front door by how long the answer takes: sync under the **29 s** REST default, **streaming** for live UX, **async job** (202 + job ID) for minutes → Skill 2.5.1.
+- **Token budgets are part of the interface:** count before the call, cap `maxTokens`, check `stopReason`, trim history. Context overflow is a `ValidationException`, so fix the input rather than retry → 2.5.1.
+- **Ready-made UI:** **Amplify AI Kit**: conversation route (multi-turn, history in DynamoDB, streamed) vs generation route (one synchronous call, structured output) → 2.5.2.
+- **Contract first:** one **OpenAPI** spec feeds API Gateway, SDKs, mocks, tests and **Bedrock Agents action groups**; agents choose operations from the **descriptions** → 2.5.2.
+- **No-code chains:** **Bedrock Flows** for business users and prompt engineers → 2.5.2 (full detail in Task 1.6).
+- **Business systems:** CRM events → **Lambda** → Bedrock → write back; documents → **Step Functions** (Textract → Comprehend → Bedrock → human review); multimodal extraction with the least orchestration → **Bedrock Data Automation** (standard output vs custom **blueprints**) → 2.5.3.
+- **Developer productivity:** **Q Developer** `/test`, `/review`, `/doc`, `/transform`, customizations. ⚠️ The IDE plugins reach **end of support on 30 April 2027** (successor **Kiro**), but the exam still names Q Developer → 2.5.4.
+- **Orchestration choice:** deterministic, auditable steps → **Step Functions** (agent design patterns as states); visual GenAI chains → **Flows**; open-ended autonomy → **Strands / Bedrock Agents / AgentCore** → 2.5.5.
+- **Troubleshooting stack:** **invocation logs** for content (+ Logs Insights), **X-Ray/ADOT** for timing per hop, **CloudTrail** for who called and the error code, `AWS/Bedrock` **metrics** for symptoms → 2.5.6.
 
 ## Notes
 
@@ -29,7 +27,7 @@
 
 > *Create FM API interfaces to address the specific requirements of GenAI workloads (for example, by using API Gateway to handle streaming responses, token limit management, retry strategies to handle model timeouts).*
 
-This skill is about **designing the API your clients call** to reach an FM. The low-level SDK streaming and backoff mechanics are in [Task 2.4](04-task-2.4-fm-api-integrations.md). Here the focus is on interface design.
+This skill is about **designing the API your clients call** to reach an FM. The low-level SDK streaming and backoff mechanics are in [Task 2.4](04-task-2.4-fm-api-integrations.md) ([streaming: Skill 2.4.2](04-task-2.4-fm-api-integrations.md#skill-242--real-time-ai-interaction-systems--pq24), [retries: Skill 2.4.3](04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems)). Here the focus is on interface design.
 
 #### What makes GenAI APIs different
 
@@ -100,23 +98,10 @@ def handler(event, _):
 
 #### Retry strategies for model timeouts
 
-- **Client/SDK side** (mechanics in [Task 2.4](04-task-2.4-fm-api-integrations.md)):
-  - boto3 `Config(retries={"mode": "adaptive" | "standard", "max_attempts": N}, read_timeout=300+)`. The default **read timeout of 60 s** is too short for long generations or reasoning models.
-  - **Exponential backoff + full jitter** to avoid thundering herds.
-- **Which errors to retry**:
-
-| Retry ✅ | Don't retry ❌ |
-| --- | --- |
-| `ThrottlingException` (429) | `ValidationException` (400: bad params, too many tokens) |
-| `ModelTimeoutException` (408) | `AccessDeniedException` (403: no model access/IAM) |
-| `ServiceUnavailableException` (503) | `ResourceNotFoundException` (wrong model ID/ARN) |
-| `InternalServerException` (500) | Guardrail interventions (by design) |
-| `ModelNotReadyException` (e.g. imported model warming up) | |
-
-- **API layer**: avoid a client retry and a Lambda retry *both* firing; set a total time budget. Use **idempotency keys** (header → DynamoDB / Powertools idempotency) so a retried `POST /generate` doesn't double-charge or double-write.
-- **Timeouts compose**: client timeout > API GW timeout > Lambda timeout > SDK read timeout. If the inner one is longer, the outer one kills the request and the work is wasted.
-- **Graceful degradation**: on repeated timeouts, fall back to a **smaller/faster model**, a cached answer, or "we'll email you", using a circuit breaker (Step Functions/AppConfig flag). Use **cross-Region inference profiles** to absorb capacity throttles.
-- **Streaming + retries**: if a stream drops mid-way you can't simply resume. Either restart (idempotent) or send the partial text back with "continue from here".
+Retry mechanics (which errors to retry, SDK `standard`/`adaptive` modes and `read_timeout`, backoff with jitter, the timeout chain, fallbacks) → Full detail: [Task 2.4 · Skill 2.4.3](04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems). What the interface itself must add:
+- **Don't retry guardrail interventions**: they are blocked by design.
+- **One retry layer, one time budget:** don't let a client retry and a Lambda retry *both* fire. Accept an **idempotency key** header (→ DynamoDB / Powertools idempotency) so a retried `POST /generate` doesn't double-charge or double-write.
+- **Streaming + retries:** if a stream drops mid-way you can't simply resume. Either restart (idempotent) or send the partial text back with "continue from here".
 
 ---
 
@@ -210,21 +195,10 @@ paths:
 
 #### Bedrock Flows (Prompt Flows) — no-code workflow builder
 
-- A visual canvas in the Bedrock console. The main node types:
-  - **Input/Output**
-  - **Prompt** (inline or from Prompt Management)
-  - **Knowledge base**
-  - **Agent**
-  - **Lambda function**
-  - **Condition**
-  - **Iterator/Collector**
-  - **Inline code** (**verify**)
-  - **S3 storage/retrieval**
-  - **Lex**
-- Lifecycle: draft → **version** (immutable snapshot) → **alias** (points to a version). Apps call **`InvokeFlow`** with `flowIdentifier` + `flowAliasIdentifier`. Promote between environments by moving the alias.
-- **Who it's for**: business analysts and prompt engineers who iterate without code, and developers who want a managed chain without Step Functions plumbing.
-- **Flows vs Step Functions**: Flows → **GenAI-native nodes**, fast to build, simpler. **Step Functions** → 220+ service integrations, long-running workflows, human-approval waits (`.waitForTaskToken`), rich error handling/retries, Standard-workflow audit history.
-- More depth (node types, conditional branching, reusable components) is in [Task 1.6](../domain-1-fm-integration-data-compliance/06-task-1.6-prompt-engineering-governance.md).
+- **The accessibility angle:** a visual canvas in the Bedrock console where **business analysts and prompt engineers** chain prompt, KB, agent, Lambda, condition and iterator nodes without code, and developers get a managed chain without Step Functions plumbing.
+- Apps consume a flow like an API: call **`InvokeFlow`** on a versioned **alias** (`flowIdentifier` + `flowAliasIdentifier`) and promote by moving the alias.
+- Flows vs Step Functions → [Skill 2.5.5](#skill-255--advanced-genai-applications).
+- → Full detail (node types, versions/aliases, branching, reusable components): [Task 1.6 · Skill 1.6.6](../domain-1-fm-integration-data-compliance/06-task-1.6-prompt-engineering-governance.md#skill-166--complex-prompt-systems-with-bedrock-prompt-flows).
 
 #### Other "accessible" options worth knowing
 
@@ -374,6 +348,9 @@ Application-level view only. Strands, Agent Squad and MCP internals are in [Task
 | **Bedrock Flows** | **Visual DAG** of prompts/KB/Lambda | Deterministic chains, no code |
 | **Step Functions** | **Explicit state machine** | Deterministic, auditable, long-running, human approval, many AWS integrations |
 
+- **Rule of thumb:** the more the path must be predictable and auditable, the further down this table you go; the more the model must decide the next step, the further up.
+- **Flows vs Step Functions**: Flows → **GenAI-native nodes**, fast to build, simpler. **Step Functions** → 220+ service integrations, long-running workflows, human-approval waits (`.waitForTaskToken`), rich error handling/retries, Standard-workflow audit history.
+
 #### Agent design patterns implemented with Step Functions
 
 | Pattern | Step Functions construct | Example |
@@ -418,7 +395,7 @@ Application-level view only. Strands, Agent Squad and MCP internals are in [Task
 ```
 
 - **Stopping conditions** (max iterations, timeouts, token budget) are mandatory for loops. See safeguarded workflows in [Task 2.1](01-task-2.1-agentic-ai-tool-integrations.md).
-- Use `Retry` on `Bedrock.ThrottlingException` / `Bedrock.ModelTimeoutException` (error names for the optimised integration: **verify in docs**) with `BackoffRate` + `JitterStrategy: FULL`.
+- Use `Retry` on `Bedrock.ThrottlingException` / `Bedrock.ModelTimeoutException` (error names for the optimised integration: **verify in docs**) with `BackoffRate` + `JitterStrategy: FULL` (retry design: [Skill 2.4.3](04-task-2.4-fm-api-integrations.md#skill-243--resilient-fm-systems)).
 
 #### Prompt chaining with Amazon Bedrock
 
@@ -505,29 +482,28 @@ fields requestMetadata.team as team, input.inputTokenCount + output.outputTokenC
 - Also run Logs Insights over **your application logs**: the Lambda structured logs from Powertools (with prompt template version, `stopReason`, latency, guardrail action, retrieved chunk IDs), so you can correlate a bad answer to its **prompt version + retrieved context**.
 - For KBs, enable **Knowledge Base logging** (ingestion job/document-level status) to troubleshoot documents that failed to ingest (**verify delivery options**).
 
+Logs tell you *what* was sent and returned. The next two tools tell you *how the system behaved*: metrics for symptoms, traces for where the time went.
+
 #### CloudWatch metrics & GenAI observability
 
-- **`AWS/Bedrock` namespace metrics** (by `ModelId`):
-  - `Invocations`
-  - `InvocationLatency`
-  - `InvocationClientErrors` (4xx)
-  - `InvocationServerErrors` (5xx)
-  - `InvocationThrottles`
-  - `InputTokenCount`, `OutputTokenCount`
-  - Image-count metrics
-  - Time-to-first-token style metrics for streaming (**verify availability**)
-- **Alarms**: throttle spikes → request a quota increase / use cross-Region inference / Provisioned Throughput. Rising latency → check output token growth. Rising client errors → recent deploy broke the payload.
-- **CloudWatch generative AI observability**: out-of-the-box dashboards for **model invocations** and **agent traces** (Bedrock AgentCore, Strands and other frameworks instrumented with **ADOT/OpenTelemetry**), showing latency, token usage, errors and spans per agent step (**verify current feature scope**).
+- **Read the `AWS/Bedrock` metrics (by `ModelId`) as symptoms** (`Invocations`, `InvocationLatency`, `InvocationClientErrors`, `InvocationServerErrors`, `InvocationThrottles`, `InputTokenCount` / `OutputTokenCount`):
+  - throttle spikes → request a quota increase / use cross-Region inference / Provisioned Throughput
+  - rising latency → check output token growth
+  - rising client errors → a recent deploy broke the payload
 - **Guardrails metrics** (interventions per policy) help tell "model refused" apart from "guardrail blocked".
+- **CloudWatch generative AI observability**: out-of-the-box dashboards for **model invocations** and **agent traces** (Bedrock AgentCore, Strands and other frameworks instrumented with **ADOT/OpenTelemetry**), showing latency, token usage, errors and spans per agent step (**verify current feature scope**).
+- → Full metric list, dimensions, KPIs and anomaly alarms: [Task 4.3 · Skill 4.3.2](../domain-4-operational-efficiency-optimization/03-task-4.3-monitoring-observability.md#skill-432--comprehensive-genai-monitoring-and-kpis).
 
 #### AWS X-Ray — tracing FM API calls
 
-- **End-to-end trace**: API Gateway (enable **active tracing**) → Lambda (active tracing) → Bedrock / KB / OpenSearch / DynamoDB as **subsegments** → Step Functions (X-Ray tracing on the state machine).
+- **End-to-end trace**: API Gateway (stage setting: enable **active tracing**) → Lambda (`TracingConfig: Active`) → Bedrock / KB / OpenSearch / DynamoDB / SQS as **subsegments** → Step Functions (X-Ray tracing on the state machine). SQS → Lambda traces are linked.
 - **Instrumentation**:
   - **AWS Distro for OpenTelemetry (ADOT)** is the recommended path; the X-Ray SDKs are moving to maintenance (**verify**).
+  - X-Ray SDK patching, e.g. `aws_xray_sdk.core.patch_all()` / `patch(['boto3'])`, so each `bedrock-runtime` call appears as a subsegment with its latency and errors.
   - Powertools Tracer for Lambda.
-  - Add **annotations** (indexed: `modelId`, `promptVersion`, `tenantId`) and **metadata** (non-indexed: token counts) to filter traces.
-- **What it answers**: *where* the latency is (retrieval vs reranking vs generation vs tool call), which downstream call is throwing, and retries/throttles visible as faults. Use the **service map** to spot the slow or failing node. **CloudWatch Transaction Search / Application Signals** gives span-level search and SLOs (**verify**).
+  - Add **annotations** (indexed: `modelId`, `promptVersion`, `tenantId`, `route`) and **metadata** (non-indexed: token counts) to filter traces.
+- **What it answers**: *where* the latency is (retrieval vs reranking vs generation vs tool call), which downstream call is throwing, and retries/throttles visible as faults. Use the **service map** (trace map) to spot the slow or failing node. **CloudWatch Transaction Search / Application Signals** gives span-level search and service-level SLOs (**verify**). For agents, **AgentCore Observability** adds agent-specific views.
+- **X-Ray vs invocation logging**: X-Ray gives you **timing**; invocation logs give you **content**. You usually need both.
 - Typical finding: "slow chatbot" = 80% of the time is in **generation**. Fix with streaming (perceived latency), a smaller model, a lower `maxTokens`, prompt caching, or **latency-optimised inference**.
 
 #### CloudTrail
